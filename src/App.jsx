@@ -189,7 +189,7 @@ function RelogioAoVivo({ big }) {
     return () => clearInterval(t);
   }, []);
   return (
-    <div className={`font-mono font-black tabular-nums tracking-tight text-amber-400 ${big ? "text-4xl" : "text-lg"}`}>
+    <div className={`shrink-0 font-mono font-black tabular-nums tracking-tight text-amber-400 ${big ? "text-2xl sm:text-4xl" : "text-lg"}`}>
       {agora.toLocaleTimeString("pt-BR")}
     </div>
   );
@@ -324,9 +324,9 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
       <div className="bg-slate-900 px-5 pt-6 pb-8 rounded-b-3xl shadow-md">
         <Logo size="big" />
         <div className="mt-5 flex items-end justify-between gap-3">
-          <div>
+          <div className="min-w-0">
             <div className="text-white/50 text-xs font-bold tracking-widest uppercase">Registro de Ponto</div>
-            <div className="text-white text-lg font-black tracking-tight mt-0.5 capitalize">
+            <div className="text-white text-base sm:text-lg font-black tracking-tight mt-0.5 capitalize truncate">
               {new Date().toLocaleDateString("pt-BR", { weekday: "long", day: "2-digit", month: "long" })}
             </div>
           </div>
