@@ -139,6 +139,16 @@ function computeSessions(registros) {
   const byFunc = {};
   registros.forEach((r) => { byFunc[r.funcionarioId] = byFunc[r.funcionarioId] || []; byFunc[r.funcionarioId].push(r); });
   const sessions = [];
+  // Sobreposição (em minutos) entre [entrada,saida] e a janela de almoço 12:00–13:00
+  const sobreposicaoAlmoco = (data, entrada, saida) => {
+    const a = new Date(`${data}T${entrada}:00`);
+    const b = new Date(`${data}T${saida}:00`);
+    const c = new Date(`${data}T12:00:00`);
+    const d = new Date(`${data}T13:00:00`);
+    const inicio = a > c ? a : c;
+    const fim = b < d ? b : d;
+    return Math.max(0, (fim - inicio) / 60000);
+  };
   Object.values(byFunc).forEach((list) => {
     const sorted = [...list].sort((a, b) => eventoKey(a).localeCompare(eventoKey(b)));
     let periodo = null;
@@ -150,6 +160,10 @@ function computeSessions(registros) {
     });
     const fechar = (r) => {
       periodo.saida = r.horario; periodo.saidaTs = r.criadoEm; periodo.aberta = false;
+      if (!periodo.intervaloInicio) {
+        const auto = sobreposicaoAlmoco(periodo.data, periodo.entrada, periodo.saida);
+        if (auto > 0) { periodo.intervaloMin = auto; periodo.intervaloAutomatico = true; }
+      }
       const brutoMin = diffMinutes(periodo.data, periodo.entrada, periodo.saida);
       periodo.minutosTrabalhados = Math.max(0, brutoMin - periodo.intervaloMin);
       sessions.push(periodo);
@@ -165,7 +179,12 @@ function computeSessions(registros) {
       else if (r.tipo === "saida") { fechar(r); periodo = null; }
     });
     if (periodo) {
-      const nowMin = diffMinutes(periodo.data, periodo.entrada, timeStr());
+      const agora = timeStr();
+      if (!periodo.intervaloInicio) {
+        const auto = sobreposicaoAlmoco(periodo.data, periodo.entrada, agora);
+        if (auto > 0) { periodo.intervaloMin = auto; periodo.intervaloAutomatico = true; }
+      }
+      const nowMin = diffMinutes(periodo.data, periodo.entrada, agora);
       periodo.minutosTrabalhados = Math.max(0, nowMin - periodo.intervaloMin);
       sessions.push(periodo);
     }
@@ -985,7 +1004,8 @@ function AbaRelatorios({ registros, funcionarios, obras }) {
 
   const rows = filtradas.slice().sort((a, b) => (b.data + b.entrada).localeCompare(a.data + a.entrada)).map((s) => ({
     Data: fmtBR(s.data), Funcionário: s.funcionarioNome, Obra: s.obraNome, Entrada: s.entrada,
-    "Início Intervalo": s.intervaloInicio || "-", "Fim Intervalo": s.intervaloFim || "-",
+    "Início Intervalo": s.intervaloInicio || (s.intervaloAutomatico ? "12:00 (auto)" : "-"),
+    "Fim Intervalo": s.intervaloFim || (s.intervaloAutomatico ? "13:00 (auto)" : "-"),
     Saída: s.aberta ? "Em andamento" : s.saida, "Horas Trabalhadas": minsToHM(s.minutosTrabalhados),
     Localização: s.entradaLoc ? (s.entradaLoc.endereco || `${s.entradaLoc.lat?.toFixed(5)}, ${s.entradaLoc.lng?.toFixed(5)}`) : "Não disponível",
   }));
