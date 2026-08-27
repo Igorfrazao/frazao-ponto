@@ -4,7 +4,8 @@ import {
   LogIn, LogOut, Coffee, CheckCircle2, XCircle, Pencil, Plus,
   ChevronLeft, FileSpreadsheet, AlertTriangle, Loader2, X, Ban,
   PlayCircle, Lock, KeyRound, Settings, LayoutDashboard, Trash2,
-  Activity, Timer,
+  Activity, Timer, Wallet, Receipt, CircleDollarSign, CalendarPlus,
+  ClipboardList,
 } from "lucide-react";
 import { loadKey, saveKey, configOk } from "./storage";
 
@@ -49,15 +50,32 @@ function diffMinutes(dateStr, t1, t2) {
   const b = new Date(`${dateStr}T${t2}:00`);
   return (b - a) / 60000;
 }
+// Chave para ordenar pelo momento REAL do evento (data+horário), não pelo
+// momento em que o registro foi inserido no sistema — essencial para que
+// lançamentos retroativos entrem na posição certa da sequência.
+function eventoKey(r) { return `${r.data}T${r.horario}`; }
 
+const SEED_CARGOS = [
+  { id: uid(), nome: "Eletricista", valorDiaria: 150, valorHora: 20 },
+  { id: uid(), nome: "Ajudante", valorDiaria: 100, valorHora: 14 },
+];
 const SEED_FUNCIONARIOS = [
-  { id: uid(), nome: "João Silva", status: "Ativo", pin: "1234" },
-  { id: uid(), nome: "Pedro Santos", status: "Ativo", pin: "5678" },
+  { id: uid(), nome: "João Silva", status: "Ativo", pin: "1234", cargoId: null, valorDiaria: null, valorHora: null },
+  { id: uid(), nome: "Pedro Santos", status: "Ativo", pin: "5678", cargoId: null, valorDiaria: null, valorHora: null },
 ];
 const SEED_OBRAS = [
   { id: uid(), nome: "Residência João", cliente: "João Silva", endereco: "Rua X, 123", cidade: "São José do Rio Preto", status: "Ativa" },
   { id: uid(), nome: "Galpão Industrial ABC", cliente: "Empresa ABC Ltda", endereco: "Av. Brasil, 900", cidade: "São José do Rio Preto", status: "Ativa" },
 ];
+
+// Valor efetivo do funcionário: usa o valor próprio se definido,
+// senão cai para o padrão do cargo.
+function valoresEfetivos(funcionario, cargos) {
+  const cargo = cargos.find((c) => c.id === funcionario?.cargoId);
+  const valorDiaria = funcionario?.valorDiaria ?? cargo?.valorDiaria ?? null;
+  const valorHora = funcionario?.valorHora ?? cargo?.valorHora ?? null;
+  return { valorDiaria, valorHora, origemDiaria: funcionario?.valorDiaria != null ? "próprio" : "cargo", origemHora: funcionario?.valorHora != null ? "próprio" : "cargo" };
+}
 
 /* ---------- Geolocation ---------- */
 function getLocation() {
@@ -86,7 +104,7 @@ function getLocation() {
 
 /* ---------- State machine ---------- */
 function getFuncionarioState(funcionarioId, registros) {
-  const list = registros.filter((r) => r.funcionarioId === funcionarioId).sort((a, b) => a.criadoEm.localeCompare(b.criadoEm));
+  const list = registros.filter((r) => r.funcionarioId === funcionarioId).sort((a, b) => eventoKey(a).localeCompare(eventoKey(b)));
   let status = "sem_entrada", obraId = null, obraNome = null;
   for (const r of list) {
     if (r.tipo === "entrada") { status = "trabalhando"; obraId = r.obraId; obraNome = r.obraNome; }
@@ -122,7 +140,7 @@ function computeSessions(registros) {
   registros.forEach((r) => { byFunc[r.funcionarioId] = byFunc[r.funcionarioId] || []; byFunc[r.funcionarioId].push(r); });
   const sessions = [];
   Object.values(byFunc).forEach((list) => {
-    const sorted = [...list].sort((a, b) => a.criadoEm.localeCompare(b.criadoEm));
+    const sorted = [...list].sort((a, b) => eventoKey(a).localeCompare(eventoKey(b)));
     let periodo = null;
     const novoPeriodo = (r) => ({
       id: uid(), data: r.data, funcionarioId: r.funcionarioId, funcionarioNome: r.funcionarioNome,
@@ -274,6 +292,7 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
   const [confirm, setConfirm] = useState(null);
   const [loadingGps, setLoadingGps] = useState(false);
   const [trocando, setTrocando] = useState(false);
+  const [enviarLocalizacao, setEnviarLocalizacao] = useState(false);
 
   const ativos = funcionarios.filter((f) => f.status === "Ativo");
   const obrasAtivas = obras.filter((o) => o.status === "Ativa");
@@ -293,9 +312,12 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
 
   async function executar(acao, novaObraId) {
     setConfirm(null);
-    setLoadingGps(true);
-    const loc = await getLocation();
-    setLoadingGps(false);
+    let loc = { disponivel: false };
+    if (enviarLocalizacao) {
+      setLoadingGps(true);
+      loc = await getLocation();
+      setLoadingGps(false);
+    }
     let obraId = estado?.obraId, obraNome = estado?.obraNome;
     if (acao === "entrada") { const obra = obrasAtivas.find((o) => o.id === obraSelecionada); obraId = obra?.id; obraNome = obra?.nome; }
     if (acao === "troca_obra") { const obra = obrasAtivas.find((o) => o.id === novaObraId); obraId = obra?.id; obraNome = obra?.nome; }
@@ -307,7 +329,7 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
       criadoEm: now.toISOString(),
     };
     onRegistrar(registro);
-    notify(`${acaoLabel[acao]} registrada às ${registro.horario}${!loc.disponivel ? " (localização não disponível)" : ""}.`);
+    notify(`${acaoLabel[acao]} registrada às ${registro.horario}${!loc.disponivel ? " (sem localização)" : ""}.`);
     setTrocando(false);
     if (acao === "saida") { setFuncionarioId(""); setObraSelecionada(""); setPinOk(false); }
   }
@@ -436,7 +458,16 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
             </div>
             <div className="flex justify-between pb-2"><span className="text-slate-500">Ação</span><span className="font-bold text-amber-600">{acaoLabel[confirm.acao]}</span></div>
           </div>
-          <div className="flex gap-3 mt-5">
+
+          <label className="flex items-start gap-2.5 mt-4 bg-slate-50 rounded-lg px-3 py-2.5 cursor-pointer">
+            <input type="checkbox" checked={enviarLocalizacao} onChange={(e) => setEnviarLocalizacao(e.target.checked)} className="mt-0.5 w-4 h-4 accent-amber-500" />
+            <span className="text-xs text-slate-600 leading-snug flex items-start gap-1.5">
+              <MapPin className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-400" />
+              Registrar minha localização (GPS) junto com este ponto — opcional.
+            </span>
+          </label>
+
+          <div className="flex gap-3 mt-4">
             <button onClick={() => setConfirm(null)} className="flex-1 rounded-lg border border-slate-300 py-3 font-bold text-slate-600">Cancelar</button>
             <button onClick={() => executar(confirm.acao, confirm.novaObraId)} className="flex-1 rounded-lg bg-emerald-600 text-white py-3 font-bold">Confirmar</button>
           </div>
@@ -480,42 +511,116 @@ function GateAdmin({ config, onEnter, goHome }) {
    ADMIN — FUNCIONÁRIOS (agora com PIN)
    ========================================================================= */
 
-function AbaFuncionarios({ funcionarios, setFuncionarios, registros }) {
+function AbaFuncionarios({ funcionarios, setFuncionarios, cargos, setCargos, registros }) {
   const [modal, setModal] = useState(null);
   const [nome, setNome] = useState("");
   const [pin, setPin] = useState("");
+  const [cargoId, setCargoId] = useState("");
+  const [personalizarValor, setPersonalizarValor] = useState(false);
+  const [valorDiaria, setValorDiaria] = useState("");
+  const [valorHora, setValorHora] = useState("");
+  const [modalCargo, setModalCargo] = useState(null);
+  const [cNome, setCNome] = useState(""), [cDiaria, setCDiaria] = useState(""), [cHora, setCHora] = useState("");
+  const [mostrarCargos, setMostrarCargos] = useState(false);
 
+  function abrirNovo() {
+    setNome(""); setPin(""); setCargoId(""); setPersonalizarValor(false); setValorDiaria(""); setValorHora("");
+    setModal({});
+  }
+  function abrirEditar(f) {
+    setNome(f.nome); setPin(f.pin || ""); setCargoId(f.cargoId || "");
+    setPersonalizarValor(f.valorDiaria != null || f.valorHora != null);
+    setValorDiaria(f.valorDiaria ?? ""); setValorHora(f.valorHora ?? "");
+    setModal({ editing: f });
+  }
   function salvar() {
     if (!nome.trim()) return;
     if (pin && pin.length !== 4) return;
+    const dados = {
+      nome: nome.trim(), pin,
+      cargoId: cargoId || null,
+      valorDiaria: personalizarValor && valorDiaria !== "" ? Number(valorDiaria) : null,
+      valorHora: personalizarValor && valorHora !== "" ? Number(valorHora) : null,
+    };
     if (modal.editing) {
-      setFuncionarios(funcionarios.map((f) => (f.id === modal.editing.id ? { ...f, nome: nome.trim(), pin } : f)));
+      setFuncionarios(funcionarios.map((f) => (f.id === modal.editing.id ? { ...f, ...dados } : f)));
     } else {
-      setFuncionarios([...funcionarios, { id: uid(), nome: nome.trim(), status: "Ativo", pin }]);
+      setFuncionarios([...funcionarios, { id: uid(), status: "Ativo", ...dados }]);
     }
-    setModal(null); setNome(""); setPin("");
+    setModal(null);
   }
   function toggleStatus(f) { setFuncionarios(funcionarios.map((x) => (x.id === f.id ? { ...x, status: x.status === "Ativo" ? "Inativo" : "Ativo" } : x))); }
 
+  function abrirNovoCargo() { setCNome(""); setCDiaria(""); setCHora(""); setModalCargo({}); }
+  function abrirEditarCargo(c) { setCNome(c.nome); setCDiaria(c.valorDiaria ?? ""); setCHora(c.valorHora ?? ""); setModalCargo({ editing: c }); }
+  function salvarCargo() {
+    if (!cNome.trim()) return;
+    const dados = { nome: cNome.trim(), valorDiaria: cDiaria !== "" ? Number(cDiaria) : null, valorHora: cHora !== "" ? Number(cHora) : null };
+    if (modalCargo.editing) setCargos(cargos.map((c) => (c.id === modalCargo.editing.id ? { ...c, ...dados } : c)));
+    else setCargos([...cargos, { id: uid(), ...dados }]);
+    setModalCargo(null);
+  }
+  function excluirCargo(c) {
+    if (funcionarios.some((f) => f.cargoId === c.id)) { alert("Este cargo está em uso por algum funcionário. Remova o vínculo antes de excluir."); return; }
+    setCargos(cargos.filter((x) => x.id !== c.id));
+  }
+
   return (
     <div>
+      <div className="flex items-center justify-between mb-3">
+        <button onClick={() => setMostrarCargos(!mostrarCargos)} className="flex items-center gap-1.5 text-sm font-bold text-slate-600 hover:text-slate-900">
+          <ClipboardList className="w-4 h-4" /> Cargos e valores padrão {mostrarCargos ? "▲" : "▼"}
+        </button>
+      </div>
+
+      {mostrarCargos && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4 mb-5">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-bold uppercase text-slate-400">Cargos ({cargos.length})</span>
+            <button onClick={abrirNovoCargo} className="flex items-center gap-1.5 bg-slate-900 text-white text-xs font-bold px-3 py-1.5 rounded-lg"><Plus className="w-3.5 h-3.5" /> Novo cargo</button>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {cargos.length === 0 && <div className="text-sm text-slate-400 py-3">Nenhum cargo cadastrado ainda.</div>}
+            {cargos.map((c) => (
+              <div key={c.id} className="flex items-center justify-between py-2.5 text-sm">
+                <div>
+                  <div className="font-semibold text-slate-800">{c.nome}</div>
+                  <div className="text-xs text-slate-400">
+                    {c.valorDiaria != null ? `Diária R$ ${c.valorDiaria}` : "Diária não definida"} · {c.valorHora != null ? `Hora R$ ${c.valorHora}` : "Hora não definida"}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button onClick={() => abrirEditarCargo(c)} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-500"><Pencil className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => excluirCargo(c)} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center justify-between mb-4">
         <h3 className="font-bold text-slate-800">Funcionários ({funcionarios.length})</h3>
-        <button onClick={() => { setNome(""); setPin(""); setModal({}); }} className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-slate-900 text-sm font-bold px-3.5 py-2 rounded-lg"><Plus className="w-4 h-4" /> Novo</button>
+        <button onClick={abrirNovo} className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-slate-900 text-sm font-bold px-3.5 py-2 rounded-lg"><Plus className="w-4 h-4" /> Novo</button>
       </div>
       <div className="bg-white rounded-xl border border-slate-200 divide-y divide-slate-100 overflow-hidden">
         {funcionarios.length === 0 && <div className="p-6 text-center text-slate-400 text-sm">Nenhum funcionário cadastrado.</div>}
         {funcionarios.map((f) => {
           const qtd = registros.filter((r) => r.funcionarioId === f.id).length;
+          const cargo = cargos.find((c) => c.id === f.cargoId);
+          const { valorDiaria: vd, valorHora: vh } = valoresEfetivos(f, cargos);
           return (
             <div key={f.id} className="flex items-center justify-between px-4 py-3">
               <div>
                 <div className="font-semibold text-slate-800">{f.nome}</div>
-                <div className="text-xs text-slate-400">{qtd} registro(s) · {f.pin ? "PIN definido" : "sem PIN"}</div>
+                <div className="text-xs text-slate-400">
+                  {qtd} registro(s) · {f.pin ? "PIN definido" : "sem PIN"} · {cargo ? cargo.nome : "sem cargo"}
+                  {(vd != null || vh != null) && <> · {vd != null ? `Diária R$ ${vd}` : ""}{vd != null && vh != null ? " / " : ""}{vh != null ? `Hora R$ ${vh}` : ""}</>}
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 <span className={`text-xs font-bold px-2 py-1 rounded-full ${f.status === "Ativo" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{f.status}</span>
-                <button onClick={() => { setNome(f.nome); setPin(f.pin || ""); setModal({ editing: f }); }} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-500"><Pencil className="w-4 h-4" /></button>
+                <button onClick={() => abrirEditar(f)} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-500"><Pencil className="w-4 h-4" /></button>
                 <button onClick={() => toggleStatus(f)} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-500">{f.status === "Ativo" ? <Ban className="w-4 h-4" /> : <CheckCircle2 className="w-4 h-4" />}</button>
               </div>
             </div>
@@ -533,7 +638,34 @@ function AbaFuncionarios({ funcionarios, setFuncionarios, registros }) {
             />
             <div className="text-xs text-slate-400 mt-1">Usado pelo funcionário para confirmar identidade ao bater o ponto.</div>
           </Field>
-          <button onClick={salvar} className="w-full bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold py-3 rounded-lg">Salvar</button>
+          <Field label="Cargo">
+            <select className={inputCls} value={cargoId} onChange={(e) => setCargoId(e.target.value)}>
+              <option value="">Sem cargo</option>
+              {cargos.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}
+            </select>
+          </Field>
+          <label className="flex items-center gap-2 mb-3 cursor-pointer">
+            <input type="checkbox" checked={personalizarValor} onChange={(e) => setPersonalizarValor(e.target.checked)} className="w-4 h-4 accent-amber-500" />
+            <span className="text-sm font-semibold text-slate-600">Definir valor próprio (diferente do cargo)</span>
+          </label>
+          {personalizarValor && (
+            <div className="grid grid-cols-2 gap-3 mb-1">
+              <Field label="Diária (R$)"><input type="number" step="0.01" className={inputCls} value={valorDiaria} onChange={(e) => setValorDiaria(e.target.value)} /></Field>
+              <Field label="Hora (R$)"><input type="number" step="0.01" className={inputCls} value={valorHora} onChange={(e) => setValorHora(e.target.value)} /></Field>
+            </div>
+          )}
+          <button onClick={salvar} className="w-full bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold py-3 rounded-lg mt-3">Salvar</button>
+        </Modal>
+      )}
+
+      {modalCargo && (
+        <Modal title={modalCargo.editing ? "Editar cargo" : "Novo cargo"} onClose={() => setModalCargo(null)}>
+          <Field label="Nome do cargo"><input className={inputCls} value={cNome} onChange={(e) => setCNome(e.target.value)} placeholder="Ex: Eletricista" autoFocus /></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Diária padrão (R$)"><input type="number" step="0.01" className={inputCls} value={cDiaria} onChange={(e) => setCDiaria(e.target.value)} /></Field>
+            <Field label="Hora padrão (R$)"><input type="number" step="0.01" className={inputCls} value={cHora} onChange={(e) => setCHora(e.target.value)} /></Field>
+          </div>
+          <button onClick={salvarCargo} className="w-full bg-slate-900 text-white font-bold py-3 rounded-lg mt-2">Salvar cargo</button>
         </Modal>
       )}
     </div>
@@ -611,6 +743,7 @@ function AbaPontos({ registros, setRegistros, funcionarios, obras, edicoes, setE
   const [motivo, setMotivo] = useState("");
   const [excluirModal, setExcluirModal] = useState(null);
   const [motivoExclusao, setMotivoExclusao] = useState("");
+  const [retroModal, setRetroModal] = useState(false);
 
   const filtrados = useMemo(() => registros
     .filter((r) => !fFunc || r.funcionarioId === fFunc)
@@ -642,9 +775,19 @@ function AbaPontos({ registros, setRegistros, funcionarios, obras, edicoes, setE
     setMotivoExclusao("");
   }
 
+  function salvarLancamentoRetroativo(novosRegistros) {
+    setRegistros([...registros, ...novosRegistros]);
+    setRetroModal(false);
+  }
+
   return (
     <div>
-      <h3 className="font-bold text-slate-800 mb-3">Registros de ponto ({filtrados.length})</h3>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="font-bold text-slate-800">Registros de ponto ({filtrados.length})</h3>
+        <button onClick={() => setRetroModal(true)} className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 text-white text-sm font-bold px-3.5 py-2 rounded-lg">
+          <CalendarPlus className="w-4 h-4" /> Lançamento retroativo
+        </button>
+      </div>
       <div className="bg-white rounded-xl border border-slate-200 p-3 mb-4 grid grid-cols-2 sm:grid-cols-5 gap-2">
         <select className={inputCls + " text-sm"} value={fFunc} onChange={(e) => setFFunc(e.target.value)}><option value="">Todos funcionários</option>{funcionarios.map((f) => <option key={f.id} value={f.id}>{f.nome}</option>)}</select>
         <select className={inputCls + " text-sm"} value={fObra} onChange={(e) => setFObra(e.target.value)}><option value="">Todas obras</option>{obras.map((o) => <option key={o.id} value={o.id}>{o.nome}</option>)}</select>
@@ -656,7 +799,7 @@ function AbaPontos({ registros, setRegistros, funcionarios, obras, edicoes, setE
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold">
-              <tr><th className="text-left px-3 py-2.5">Data</th><th className="text-left px-3 py-2.5">Funcionário</th><th className="text-left px-3 py-2.5">Obra</th><th className="text-left px-3 py-2.5">Tipo</th><th className="text-left px-3 py-2.5">Horário</th><th className="text-left px-3 py-2.5">GPS</th><th className="text-left px-3 py-2.5"></th></tr>
+              <tr><th className="text-left px-3 py-2.5">Data</th><th className="text-left px-3 py-2.5">Funcionário</th><th className="text-left px-3 py-2.5">Obra</th><th className="text-left px-3 py-2.5">Tipo</th><th className="text-left px-3 py-2.5">Horário</th><th className="text-left px-3 py-2.5">Origem</th><th className="text-left px-3 py-2.5"></th></tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filtrados.map((r) => {
@@ -668,7 +811,11 @@ function AbaPontos({ registros, setRegistros, funcionarios, obras, edicoes, setE
                     <td className="px-3 py-2.5 whitespace-nowrap">{r.obraNome || "-"}</td>
                     <td className="px-3 py-2.5 whitespace-nowrap"><span className="flex items-center gap-1"><Icon className="w-3.5 h-3.5 text-slate-400" />{TIPOS[r.tipo]}</span></td>
                     <td className="px-3 py-2.5 whitespace-nowrap font-semibold">{r.horario}{editado && <span className="ml-1 text-amber-500" title="Editado pelo administrador">*</span>}</td>
-                    <td className="px-3 py-2.5 whitespace-nowrap">{r.localizacaoDisponivel ? <span className="flex items-center gap-1 text-emerald-600 text-xs font-semibold"><MapPin className="w-3.5 h-3.5" />OK</span> : <span className="flex items-center gap-1 text-slate-400 text-xs font-semibold"><MapPin className="w-3.5 h-3.5" />Indisponível</span>}</td>
+                    <td className="px-3 py-2.5 whitespace-nowrap">
+                      {r.manual ? <span className="flex items-center gap-1 text-sky-600 text-xs font-semibold"><ClipboardList className="w-3.5 h-3.5" />Manual</span>
+                        : r.localizacaoDisponivel ? <span className="flex items-center gap-1 text-emerald-600 text-xs font-semibold"><MapPin className="w-3.5 h-3.5" />GPS</span>
+                        : <span className="flex items-center gap-1 text-slate-400 text-xs font-semibold"><MapPin className="w-3.5 h-3.5" />Sem GPS</span>}
+                    </td>
                     <td className="px-3 py-2.5">
                       <div className="flex items-center gap-2">
                         <button onClick={() => abrirEdicao(r)} className="text-slate-400 hover:text-amber-600" title="Corrigir horário"><Pencil className="w-4 h-4" /></button>
@@ -714,7 +861,107 @@ function AbaPontos({ registros, setRegistros, funcionarios, obras, edicoes, setE
           </div>
         </Modal>
       )}
+
+      {retroModal && (
+        <ModalLancamentoRetroativo funcionarios={funcionarios} obras={obras} onSalvar={salvarLancamentoRetroativo} onClose={() => setRetroModal(false)} />
+      )}
     </div>
+  );
+}
+
+/* ---------- Lançamento retroativo (dia completo, de uma vez) ---------- */
+function ModalLancamentoRetroativo({ funcionarios, obras, onSalvar, onClose }) {
+  const [funcionarioId, setFuncionarioId] = useState("");
+  const [data, setData] = useState(todayStr());
+  const [periodos, setPeriodos] = useState([{ obraId: "", entrada: "", intervaloInicio: "", intervaloFim: "", saida: "" }]);
+  const [erro, setErro] = useState("");
+
+  const obrasAtivas = obras.filter((o) => o.status === "Ativa");
+
+  function addPeriodo() { setPeriodos([...periodos, { obraId: "", entrada: "", intervaloInicio: "", intervaloFim: "", saida: "" }]); }
+  function removerPeriodo(i) { setPeriodos(periodos.filter((_, idx) => idx !== i)); }
+  function atualizar(i, campo, valor) { setPeriodos(periodos.map((p, idx) => (idx === i ? { ...p, [campo]: valor } : p))); }
+
+  function validar() {
+    if (!funcionarioId) return "Selecione o funcionário.";
+    if (!data) return "Selecione a data.";
+    for (const [i, p] of periodos.entries()) {
+      if (!p.obraId || !p.entrada || !p.saida) return `Período ${i + 1}: obra, entrada e saída são obrigatórios.`;
+      if (p.entrada >= p.saida) return `Período ${i + 1}: a entrada precisa ser antes da saída.`;
+      if ((p.intervaloInicio && !p.intervaloFim) || (!p.intervaloInicio && p.intervaloFim)) return `Período ${i + 1}: preencha início e fim do intervalo juntos, ou deixe os dois em branco.`;
+      if (p.intervaloInicio && p.intervaloFim && p.intervaloInicio >= p.intervaloFim) return `Período ${i + 1}: início do intervalo precisa ser antes do fim.`;
+    }
+    for (let i = 1; i < periodos.length; i++) {
+      if (periodos[i].entrada < periodos[i - 1].saida) return `Período ${i + 1}: a entrada não pode ser antes da saída do período anterior.`;
+    }
+    return "";
+  }
+
+  function salvar() {
+    const msg = validar();
+    if (msg) { setErro(msg); return; }
+    const funcionario = funcionarios.find((f) => f.id === funcionarioId);
+    const base = { funcionarioId: funcionario.id, funcionarioNome: funcionario.nome, data, localizacaoDisponivel: false, lat: null, lng: null, precisao: null, endereco: null, manual: true };
+    const eventos = [];
+    const carimbo = (horario) => new Date(`${data}T${horario}:00`).toISOString();
+    periodos.forEach((p, i) => {
+      const obra = obras.find((o) => o.id === p.obraId);
+      eventos.push({ ...base, id: uid(), tipo: i === 0 ? "entrada" : "troca_obra", obraId: p.obraId, obraNome: obra?.nome, horario: p.entrada, criadoEm: carimbo(p.entrada) });
+      if (p.intervaloInicio) eventos.push({ ...base, id: uid(), tipo: "inicio_intervalo", obraId: p.obraId, obraNome: obra?.nome, horario: p.intervaloInicio, criadoEm: carimbo(p.intervaloInicio) });
+      if (p.intervaloFim) eventos.push({ ...base, id: uid(), tipo: "fim_intervalo", obraId: p.obraId, obraNome: obra?.nome, horario: p.intervaloFim, criadoEm: carimbo(p.intervaloFim) });
+      if (i === periodos.length - 1) eventos.push({ ...base, id: uid(), tipo: "saida", obraId: p.obraId, obraNome: obra?.nome, horario: p.saida, criadoEm: carimbo(p.saida) });
+    });
+    onSalvar(eventos);
+  }
+
+  return (
+    <Modal title="Lançamento retroativo" onClose={onClose} wide>
+      <div className="text-sm text-slate-500 mb-4">Lance o dia inteiro de uma vez, direto do papel — o sistema monta entrada, intervalo, troca de obra e saída automaticamente.</div>
+      <div className="grid grid-cols-2 gap-3 mb-4">
+        <Field label="Funcionário">
+          <select className={inputCls} value={funcionarioId} onChange={(e) => setFuncionarioId(e.target.value)}>
+            <option value="">Selecionar</option>
+            {funcionarios.map((f) => <option key={f.id} value={f.id}>{f.nome}</option>)}
+          </select>
+        </Field>
+        <Field label="Data"><input type="date" className={inputCls} value={data} onChange={(e) => setData(e.target.value)} /></Field>
+      </div>
+
+      <div className="space-y-4">
+        {periodos.map((p, i) => (
+          <div key={i} className="border border-slate-200 rounded-xl p-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold uppercase text-slate-400">Período {i + 1}</span>
+              {periodos.length > 1 && <button onClick={() => removerPeriodo(i)} className="text-rose-500 hover:text-rose-700"><Trash2 className="w-4 h-4" /></button>}
+            </div>
+            <Field label="Obra">
+              <select className={inputCls} value={p.obraId} onChange={(e) => atualizar(i, "obraId", e.target.value)}>
+                <option value="">Selecionar obra</option>
+                {obrasAtivas.map((o) => <option key={o.id} value={o.id}>{o.nome}</option>)}
+              </select>
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Entrada"><input type="time" className={inputCls} value={p.entrada} onChange={(e) => atualizar(i, "entrada", e.target.value)} /></Field>
+              <Field label="Saída"><input type="time" className={inputCls} value={p.saida} onChange={(e) => atualizar(i, "saida", e.target.value)} /></Field>
+              <Field label="Início intervalo (opcional)"><input type="time" className={inputCls} value={p.intervaloInicio} onChange={(e) => atualizar(i, "intervaloInicio", e.target.value)} /></Field>
+              <Field label="Fim intervalo (opcional)"><input type="time" className={inputCls} value={p.intervaloFim} onChange={(e) => atualizar(i, "intervaloFim", e.target.value)} /></Field>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <button onClick={addPeriodo} className="flex items-center gap-1.5 text-sm font-bold text-sky-600 mt-3">
+        <Plus className="w-4 h-4" /> Adicionar troca de obra no mesmo dia
+      </button>
+
+      {erro && (
+        <div className="flex items-start gap-2 bg-rose-50 border border-rose-200 rounded-lg p-3 mt-4 text-sm text-rose-700">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" /> {erro}
+        </div>
+      )}
+
+      <button onClick={salvar} className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-3 rounded-lg mt-5">Salvar lançamento</button>
+    </Modal>
   );
 }
 
@@ -918,6 +1165,229 @@ function AbaDashboard({ funcionarios, obras, registros, setTab }) {
 }
 
 /* =========================================================================
+   ADMIN — FINANCEIRO (fechamento de diária/hora, pagamentos e vales)
+   ========================================================================= */
+
+function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFechamentos, vales, setVales, notify }) {
+  const [subTab, setSubTab] = useState("pendentes");
+  const [valeModal, setValeModal] = useState(false);
+  const [valeFunc, setValeFunc] = useState(""), [valeValor, setValeValor] = useState(""), [valeData, setValeData] = useState(todayStr()), [valeMotivo, setValeMotivo] = useState("");
+
+  const sessions = useMemo(() => computeSessions(registros), [registros]);
+
+  const diasFechados = useMemo(() => new Set(fechamentos.map((f) => f.funcionarioId + "|" + f.data)), [fechamentos]);
+
+  const diasPendentes = useMemo(() => {
+    const grupos = {};
+    sessions.filter((s) => !s.aberta).forEach((s) => {
+      const key = s.funcionarioId + "|" + s.data;
+      grupos[key] = grupos[key] || { funcionarioId: s.funcionarioId, funcionarioNome: s.funcionarioNome, data: s.data, obras: {}, totalMin: 0 };
+      grupos[key].obras[s.obraNome] = (grupos[key].obras[s.obraNome] || 0) + s.minutosTrabalhados;
+      grupos[key].totalMin += s.minutosTrabalhados;
+    });
+    return Object.values(grupos).filter((g) => !diasFechados.has(g.funcionarioId + "|" + g.data)).sort((a, b) => b.data.localeCompare(a.data));
+  }, [sessions, diasFechados]);
+
+  function fecharDia(dia, tipo) {
+    const funcionario = funcionarios.find((f) => f.id === dia.funcionarioId);
+    const { valorDiaria, valorHora } = valoresEfetivos(funcionario, cargos);
+    const horas = dia.totalMin / 60;
+    const valorCalculado = tipo === "diaria" ? valorDiaria : Math.round(valorHora * horas * 100) / 100;
+    if (valorCalculado == null) { notify("Defina o valor de diária/hora no cadastro do funcionário ou do cargo antes de fechar.", "error"); return; }
+    setFechamentos([...fechamentos, {
+      id: uid(), funcionarioId: dia.funcionarioId, funcionarioNome: dia.funcionarioNome, data: dia.data,
+      tipoPagamento: tipo, minutosTrabalhados: dia.totalMin, valorUsado: tipo === "diaria" ? valorDiaria : valorHora,
+      valorCalculado, pago: false, dataPagamento: null, criadoEm: new Date().toISOString(),
+    }]);
+    notify(`Dia ${fmtBR(dia.data)} de ${dia.funcionarioNome} fechado como ${tipo === "diaria" ? "diária" : "hora"}: R$ ${valorCalculado.toFixed(2)}.`);
+  }
+
+  function marcarPago(f) { setFechamentos(fechamentos.map((x) => (x.id === f.id ? { ...x, pago: true, dataPagamento: todayStr() } : x))); }
+  function marcarPendente(f) { setFechamentos(fechamentos.map((x) => (x.id === f.id ? { ...x, pago: false, dataPagamento: null } : x))); }
+  function excluirFechamento(f) { setFechamentos(fechamentos.filter((x) => x.id !== f.id)); }
+
+  function salvarVale() {
+    if (!valeFunc || !valeValor || Number(valeValor) <= 0) { notify("Preencha funcionário e um valor válido.", "error"); return; }
+    const funcionario = funcionarios.find((f) => f.id === valeFunc);
+    setVales([...vales, { id: uid(), funcionarioId: valeFunc, funcionarioNome: funcionario.nome, valor: Number(valeValor), data: valeData, motivo: valeMotivo.trim(), criadoEm: new Date().toISOString() }]);
+    setValeModal(false); setValeFunc(""); setValeValor(""); setValeMotivo("");
+  }
+  function excluirVale(v) { setVales(vales.filter((x) => x.id !== v.id)); }
+
+  const saldos = useMemo(() => funcionarios.map((f) => {
+    const fechs = fechamentos.filter((x) => x.funcionarioId === f.id);
+    const pendente = fechs.filter((x) => !x.pago).reduce((a, x) => a + x.valorCalculado, 0);
+    const pago = fechs.filter((x) => x.pago).reduce((a, x) => a + x.valorCalculado, 0);
+    const totalVales = vales.filter((v) => v.funcionarioId === f.id).reduce((a, v) => a + v.valor, 0);
+    return { funcionario: f, pendente, pago, totalVales, saldo: pendente - totalVales };
+  }).filter((s) => s.pendente > 0 || s.pago > 0 || s.totalVales > 0), [funcionarios, fechamentos, vales]);
+
+  const totalAReceberGeral = saldos.reduce((a, s) => a + s.saldo, 0);
+
+  const subTabs = [
+    { id: "pendentes", label: `Dias a fechar (${diasPendentes.length})` },
+    { id: "fechamentos", label: "Fechamentos" },
+    { id: "vales", label: "Vales" },
+  ];
+
+  return (
+    <div>
+      <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><Wallet className="w-4 h-4" /> Financeiro</h3>
+
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-5">
+        <div className="bg-slate-900 text-white rounded-xl p-4"><div className="text-xs text-white/50 font-bold uppercase">Saldo total a pagar</div><div className="text-2xl font-black mt-1">R$ {totalAReceberGeral.toFixed(2)}</div></div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4"><div className="text-xs text-slate-400 font-bold uppercase">Dias sem fechar</div><div className="text-2xl font-black mt-1 text-slate-800">{diasPendentes.length}</div></div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4"><div className="text-xs text-slate-400 font-bold uppercase">Vales no total</div><div className="text-2xl font-black mt-1 text-slate-800">R$ {vales.reduce((a, v) => a + v.valor, 0).toFixed(2)}</div></div>
+      </div>
+
+      {saldos.length > 0 && (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden mb-5">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold"><tr><th className="text-left px-3 py-2.5">Funcionário</th><th className="text-right px-3 py-2.5">A receber</th><th className="text-right px-3 py-2.5">Já pago</th><th className="text-right px-3 py-2.5">Vales</th><th className="text-right px-3 py-2.5">Saldo</th></tr></thead>
+              <tbody className="divide-y divide-slate-100">
+                {saldos.map((s) => (
+                  <tr key={s.funcionario.id}>
+                    <td className="px-3 py-2.5 font-semibold text-slate-800">{s.funcionario.nome}</td>
+                    <td className="px-3 py-2.5 text-right">R$ {s.pendente.toFixed(2)}</td>
+                    <td className="px-3 py-2.5 text-right text-slate-500">R$ {s.pago.toFixed(2)}</td>
+                    <td className="px-3 py-2.5 text-right text-rose-500">- R$ {s.totalVales.toFixed(2)}</td>
+                    <td className={`px-3 py-2.5 text-right font-bold ${s.saldo < 0 ? "text-rose-600" : "text-emerald-600"}`}>R$ {s.saldo.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div className="flex gap-1 mb-4 border-b border-slate-200">
+        {subTabs.map((t) => (
+          <button key={t.id} onClick={() => setSubTab(t.id)} className={`px-3.5 py-2 text-sm font-bold border-b-2 ${subTab === t.id ? "border-amber-500 text-slate-900" : "border-transparent text-slate-400"}`}>{t.label}</button>
+        ))}
+      </div>
+
+      {subTab === "pendentes" && (
+        <div className="space-y-3">
+          {diasPendentes.length === 0 && <div className="bg-white border border-slate-200 rounded-xl p-6 text-center text-slate-400 text-sm">Nenhum dia trabalhado pendente de fechamento.</div>}
+          {diasPendentes.map((d) => {
+            const funcionario = funcionarios.find((f) => f.id === d.funcionarioId);
+            const { valorDiaria, valorHora } = valoresEfetivos(funcionario, cargos);
+            const horas = d.totalMin / 60;
+            return (
+              <div key={d.funcionarioId + d.data} className="bg-white border border-slate-200 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div>
+                    <div className="font-bold text-slate-800">{d.funcionarioNome}</div>
+                    <div className="text-xs text-slate-400">{fmtBR(d.data)}</div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-xs text-slate-400 font-bold uppercase">Total do dia</div>
+                    <div className="font-black text-slate-800">{minsToHM(d.totalMin)}</div>
+                  </div>
+                </div>
+                <div className="text-xs text-slate-500 mb-3">
+                  {Object.entries(d.obras).map(([obra, min]) => `${obra}: ${minsToHM(min)}`).join(" · ")}
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => fecharDia(d, "diaria")} disabled={valorDiaria == null}
+                    className="flex-1 rounded-lg border border-slate-300 disabled:opacity-40 disabled:cursor-not-allowed py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                    Fechar diária {valorDiaria != null ? `(R$ ${valorDiaria.toFixed(2)})` : "(sem valor definido)"}
+                  </button>
+                  <button onClick={() => fecharDia(d, "hora")} disabled={valorHora == null}
+                    className="flex-1 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed py-2.5 text-sm font-bold text-slate-900">
+                    Fechar por hora {valorHora != null ? `(R$ ${(valorHora * horas).toFixed(2)})` : "(sem valor definido)"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {subTab === "fechamentos" && (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold">
+                <tr><th className="text-left px-3 py-2.5">Data</th><th className="text-left px-3 py-2.5">Funcionário</th><th className="text-left px-3 py-2.5">Tipo</th><th className="text-right px-3 py-2.5">Valor</th><th className="text-left px-3 py-2.5">Status</th><th className="text-left px-3 py-2.5"></th></tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {fechamentos.slice().sort((a, b) => b.data.localeCompare(a.data)).map((f) => (
+                  <tr key={f.id} className="hover:bg-slate-50">
+                    <td className="px-3 py-2.5 whitespace-nowrap">{fmtBR(f.data)}</td>
+                    <td className="px-3 py-2.5 whitespace-nowrap">{f.funcionarioNome}</td>
+                    <td className="px-3 py-2.5 whitespace-nowrap">{f.tipoPagamento === "diaria" ? "Diária" : "Por hora"}</td>
+                    <td className="px-3 py-2.5 whitespace-nowrap text-right font-bold">R$ {f.valorCalculado.toFixed(2)}</td>
+                    <td className="px-3 py-2.5 whitespace-nowrap">
+                      <span className={`text-xs font-bold px-2 py-1 rounded-full ${f.pago ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{f.pago ? `Pago em ${fmtBR(f.dataPagamento)}` : "Pendente"}</span>
+                    </td>
+                    <td className="px-3 py-2.5 whitespace-nowrap">
+                      <div className="flex items-center gap-2">
+                        {f.pago
+                          ? <button onClick={() => marcarPendente(f)} className="text-xs font-bold text-slate-500 hover:text-slate-700">Reabrir</button>
+                          : <button onClick={() => marcarPago(f)} className="text-xs font-bold text-emerald-600 hover:text-emerald-800">Marcar pago</button>}
+                        <button onClick={() => excluirFechamento(f)} className="text-slate-400 hover:text-rose-600"><Trash2 className="w-4 h-4" /></button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {fechamentos.length === 0 && <tr><td colSpan={6} className="text-center py-8 text-slate-400">Nenhum dia fechado ainda.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {subTab === "vales" && (
+        <div>
+          <div className="flex justify-end mb-3">
+            <button onClick={() => setValeModal(true)} className="flex items-center gap-1.5 bg-slate-900 text-white text-sm font-bold px-3.5 py-2 rounded-lg"><Plus className="w-4 h-4" /> Novo vale</button>
+          </div>
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold"><tr><th className="text-left px-3 py-2.5">Data</th><th className="text-left px-3 py-2.5">Funcionário</th><th className="text-left px-3 py-2.5">Motivo</th><th className="text-right px-3 py-2.5">Valor</th><th className="text-left px-3 py-2.5"></th></tr></thead>
+                <tbody className="divide-y divide-slate-100">
+                  {vales.slice().sort((a, b) => b.data.localeCompare(a.data)).map((v) => (
+                    <tr key={v.id} className="hover:bg-slate-50">
+                      <td className="px-3 py-2.5 whitespace-nowrap">{fmtBR(v.data)}</td>
+                      <td className="px-3 py-2.5 whitespace-nowrap">{v.funcionarioNome}</td>
+                      <td className="px-3 py-2.5">{v.motivo || "-"}</td>
+                      <td className="px-3 py-2.5 whitespace-nowrap text-right font-bold text-rose-600">R$ {v.valor.toFixed(2)}</td>
+                      <td className="px-3 py-2.5"><button onClick={() => excluirVale(v)} className="text-slate-400 hover:text-rose-600"><Trash2 className="w-4 h-4" /></button></td>
+                    </tr>
+                  ))}
+                  {vales.length === 0 && <tr><td colSpan={5} className="text-center py-8 text-slate-400">Nenhum vale registrado.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {valeModal && (
+        <Modal title="Novo vale" onClose={() => setValeModal(false)}>
+          <Field label="Funcionário">
+            <select className={inputCls} value={valeFunc} onChange={(e) => setValeFunc(e.target.value)}>
+              <option value="">Selecionar</option>
+              {funcionarios.map((f) => <option key={f.id} value={f.id}>{f.nome}</option>)}
+            </select>
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Valor (R$)"><input type="number" step="0.01" className={inputCls} value={valeValor} onChange={(e) => setValeValor(e.target.value)} /></Field>
+            <Field label="Data"><input type="date" className={inputCls} value={valeData} onChange={(e) => setValeData(e.target.value)} /></Field>
+          </div>
+          <Field label="Motivo (opcional)"><input className={inputCls} value={valeMotivo} onChange={(e) => setValeMotivo(e.target.value)} placeholder="Ex: adiantamento pedido pelo funcionário" /></Field>
+          <div className="text-xs text-slate-400 mb-3">O valor é descontado automaticamente do saldo a receber do funcionário.</div>
+          <button onClick={salvarVale} className="w-full bg-slate-900 text-white font-bold py-3 rounded-lg">Registrar vale</button>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* =========================================================================
    ADMIN — CONFIGURAÇÕES (trocar senha)
    ========================================================================= */
 
@@ -949,13 +1419,14 @@ function AbaConfiguracoes({ config, setConfig, notify }) {
    ADMIN SHELL
    ========================================================================= */
 
-function PainelAdmin({ funcionarios, setFuncionarios, obras, setObras, registros, setRegistros, edicoes, setEdicoes, config, setConfig, notify, goHome }) {
+function PainelAdmin({ funcionarios, setFuncionarios, obras, setObras, registros, setRegistros, edicoes, setEdicoes, cargos, setCargos, fechamentos, setFechamentos, vales, setVales, config, setConfig, notify, goHome }) {
   const [tab, setTab] = useState("dashboard");
   const tabs = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "funcionarios", label: "Funcionários", icon: Users },
     { id: "obras", label: "Obras", icon: Building2 },
     { id: "pontos", label: "Pontos", icon: Clock },
+    { id: "financeiro", label: "Financeiro", icon: Wallet },
     { id: "relatorios", label: "Relatórios", icon: FileSpreadsheet },
     { id: "config", label: "Configurações", icon: Settings },
   ];
@@ -976,9 +1447,10 @@ function PainelAdmin({ funcionarios, setFuncionarios, obras, setObras, registros
       </div>
       <div className="max-w-5xl mx-auto p-4">
         {tab === "dashboard" && <AbaDashboard funcionarios={funcionarios} obras={obras} registros={registros} setTab={setTab} />}
-        {tab === "funcionarios" && <AbaFuncionarios funcionarios={funcionarios} setFuncionarios={setFuncionarios} registros={registros} />}
+        {tab === "funcionarios" && <AbaFuncionarios funcionarios={funcionarios} setFuncionarios={setFuncionarios} cargos={cargos} setCargos={setCargos} registros={registros} />}
         {tab === "obras" && <AbaObras obras={obras} setObras={setObras} registros={registros} />}
         {tab === "pontos" && <AbaPontos registros={registros} setRegistros={setRegistros} funcionarios={funcionarios} obras={obras} edicoes={edicoes} setEdicoes={setEdicoes} />}
+        {tab === "financeiro" && <AbaFinanceiro funcionarios={funcionarios} cargos={cargos} registros={registros} fechamentos={fechamentos} setFechamentos={setFechamentos} vales={vales} setVales={setVales} notify={notify} />}
         {tab === "relatorios" && <AbaRelatorios registros={registros} funcionarios={funcionarios} obras={obras} />}
         {tab === "config" && <AbaConfiguracoes config={config} setConfig={setConfig} notify={notify} />}
       </div>
@@ -997,23 +1469,31 @@ export default function App() {
   const [obras, _setObras] = useState([]);
   const [registros, _setRegistros] = useState([]);
   const [edicoes, _setEdicoes] = useState([]);
+  const [cargos, _setCargos] = useState([]);
+  const [fechamentos, _setFechamentos] = useState([]);
+  const [vales, _setVales] = useState([]);
   const [config, _setConfig] = useState(null);
   const [toast, setToast] = useState(null);
 
   useEffect(() => {
     (async () => {
-      const [f, o, r, e, c] = await Promise.all([
+      const [f, o, r, e, c, cg, fc, vl] = await Promise.all([
         loadKey("funcionarios", null), loadKey("obras", null), loadKey("registros", []),
         loadKey("edicoes", []), loadKey("config", null),
+        loadKey("cargos", null), loadKey("fechamentos", []), loadKey("vales", []),
       ]);
       _setFuncionarios(f ?? SEED_FUNCIONARIOS);
       _setObras(o ?? SEED_OBRAS);
       _setRegistros(r);
       _setEdicoes(e);
       _setConfig(c ?? { adminPassword: DEFAULT_ADMIN_PASSWORD });
+      _setCargos(cg ?? SEED_CARGOS);
+      _setFechamentos(fc);
+      _setVales(vl);
       if (f === null) saveKey("funcionarios", SEED_FUNCIONARIOS);
       if (o === null) saveKey("obras", SEED_OBRAS);
       if (c === null) saveKey("config", { adminPassword: DEFAULT_ADMIN_PASSWORD });
+      if (cg === null) saveKey("cargos", SEED_CARGOS);
       setLoaded(true);
     })();
   }, []);
@@ -1023,6 +1503,9 @@ export default function App() {
   const setRegistros = useCallback((v) => { _setRegistros(v); saveKey("registros", v); }, []);
   const setEdicoes = useCallback((v) => { _setEdicoes(v); saveKey("edicoes", v); }, []);
   const setConfig = useCallback((v) => { _setConfig(v); saveKey("config", v); }, []);
+  const setCargos = useCallback((v) => { _setCargos(v); saveKey("cargos", v); }, []);
+  const setFechamentos = useCallback((v) => { _setFechamentos(v); saveKey("fechamentos", v); }, []);
+  const setVales = useCallback((v) => { _setVales(v); saveKey("vales", v); }, []);
 
   function notify(msg, type = "success") { setToast({ msg, type }); setTimeout(() => setToast(null), 3200); }
   function registrarPonto(registro) { setRegistros([...registros, registro]); }
@@ -1067,6 +1550,9 @@ export default function App() {
           obras={obras} setObras={setObras}
           registros={registros} setRegistros={setRegistros}
           edicoes={edicoes} setEdicoes={setEdicoes}
+          cargos={cargos} setCargos={setCargos}
+          fechamentos={fechamentos} setFechamentos={setFechamentos}
+          vales={vales} setVales={setVales}
           config={config} setConfig={setConfig}
           notify={notify}
           goHome={() => setTela("home")}
