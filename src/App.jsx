@@ -312,6 +312,7 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
   const [loadingGps, setLoadingGps] = useState(false);
   const [trocando, setTrocando] = useState(false);
   const [enviarLocalizacao, setEnviarLocalizacao] = useState(false);
+  const [horaManual, setHoraManual] = useState(timeStr());
 
   const ativos = funcionarios.filter((f) => f.status === "Ativo");
   const obrasAtivas = obras.filter((o) => o.status === "Ativa");
@@ -341,11 +342,13 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
     if (acao === "entrada") { const obra = obrasAtivas.find((o) => o.id === obraSelecionada); obraId = obra?.id; obraNome = obra?.nome; }
     if (acao === "troca_obra") { const obra = obrasAtivas.find((o) => o.id === novaObraId); obraId = obra?.id; obraNome = obra?.nome; }
     const now = new Date();
+    const horarioReal = timeStr(now);
+    const horarioFinal = horaManual || horarioReal;
     const registro = {
       id: uid(), funcionarioId: funcionario.id, funcionarioNome: funcionario.nome, obraId, obraNome, tipo: acao,
-      data: todayStr(now), horario: timeStr(now), localizacaoDisponivel: loc.disponivel,
+      data: todayStr(now), horario: horarioFinal, localizacaoDisponivel: loc.disponivel,
       lat: loc.lat ?? null, lng: loc.lng ?? null, precisao: loc.precisao ?? null, endereco: loc.endereco ?? null,
-      criadoEm: now.toISOString(),
+      criadoEm: now.toISOString(), horarioAjustado: horarioFinal !== horarioReal,
     };
     onRegistrar(registro);
     notify(`${acaoLabel[acao]} registrada às ${registro.horario}${!loc.disponivel ? " (sem localização)" : ""}.`);
@@ -357,6 +360,7 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
     if (!check.ok) { notify(check.msg, "error"); return; }
     if (acao === "entrada" && !obraSelecionada) { notify("Selecione a obra antes de confirmar.", "error"); return; }
     if (acao === "troca_obra" && !novaObraId) { notify("Selecione a nova obra.", "error"); return; }
+    setHoraManual(timeStr());
     setConfirm({ acao, novaObraId });
   }
 
@@ -461,10 +465,15 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
 
       {confirm && (
         <Modal title="Confirmar registro" onClose={() => setConfirm(null)}>
-          <div className="flex items-center justify-center gap-2 bg-slate-900 rounded-xl py-4 mb-4">
-            <Timer className="w-5 h-5 text-amber-400" />
-            <span className="font-mono font-black text-3xl text-amber-400 tabular-nums">{timeStr()}</span>
+          <div className="flex items-center justify-center gap-2 bg-slate-900 rounded-xl py-3 mb-1">
+            <Timer className="w-5 h-5 text-amber-400 shrink-0" />
+            <input
+              type="time" value={horaManual} onChange={(e) => setHoraManual(e.target.value)}
+              className="bg-transparent font-mono font-black text-3xl text-amber-400 tabular-nums text-center outline-none w-[7ch]"
+              style={{ colorScheme: "dark" }}
+            />
           </div>
+          <div className="text-center text-[11px] text-slate-400 mb-4">Toque no horário para ajustar manualmente, se precisar.</div>
           <div className="space-y-3 text-sm">
             <div className="flex justify-between border-b border-slate-100 pb-2"><span className="text-slate-500">Funcionário</span><span className="font-bold text-slate-900">{funcionario?.nome}</span></div>
             <div className="flex justify-between border-b border-slate-100 pb-2">
@@ -829,7 +838,11 @@ function AbaPontos({ registros, setRegistros, funcionarios, obras, edicoes, setE
                     <td className="px-3 py-2.5 whitespace-nowrap">{r.funcionarioNome}</td>
                     <td className="px-3 py-2.5 whitespace-nowrap">{r.obraNome || "-"}</td>
                     <td className="px-3 py-2.5 whitespace-nowrap"><span className="flex items-center gap-1"><Icon className="w-3.5 h-3.5 text-slate-400" />{TIPOS[r.tipo]}</span></td>
-                    <td className="px-3 py-2.5 whitespace-nowrap font-semibold">{r.horario}{editado && <span className="ml-1 text-amber-500" title="Editado pelo administrador">*</span>}</td>
+                    <td className="px-3 py-2.5 whitespace-nowrap font-semibold">
+                      {r.horario}
+                      {editado && <span className="ml-1 text-amber-500" title="Editado pelo administrador">*</span>}
+                      {r.horarioAjustado && <span className="ml-1 text-sky-500" title="Horário ajustado manualmente pelo funcionário no momento do registro">✎</span>}
+                    </td>
                     <td className="px-3 py-2.5 whitespace-nowrap">
                       {r.manual ? <span className="flex items-center gap-1 text-sky-600 text-xs font-semibold"><ClipboardList className="w-3.5 h-3.5" />Manual</span>
                         : r.localizacaoDisponivel ? <span className="flex items-center gap-1 text-emerald-600 text-xs font-semibold"><MapPin className="w-3.5 h-3.5" />GPS</span>
@@ -1184,6 +1197,31 @@ function AbaDashboard({ funcionarios, obras, registros, setTab }) {
   );
 }
 
+function valorLiquidoFechamento(f) {
+  const descontos = f.descontos || [];
+  return f.valorCalculado - descontos.reduce((a, d) => a + d.valor, 0);
+}
+
+function gerarTextoResumo({ funcionario, itens, totalMin, totalBruto, totalDescontos, valesUsados, valorFinal }) {
+  const linhas = [];
+  linhas.push(`📋 Fechamento de pagamento — ${funcionario.nome}`);
+  linhas.push("");
+  itens.forEach((f) => {
+    const tipo = f.tipoPagamento === "diaria" ? "Diária" : "Por hora";
+    linhas.push(`📅 ${fmtBR(f.data)} — ${tipo} — ${minsToHM(f.minutosTrabalhados)} — R$ ${f.valorCalculado.toFixed(2)}`);
+    (f.descontos || []).forEach((d) => linhas.push(`     ↳ Desconto: ${d.motivo || "sem motivo"} — R$ ${d.valor.toFixed(2)}`));
+  });
+  linhas.push("");
+  linhas.push(`Dias trabalhados: ${itens.length}`);
+  linhas.push(`Total de horas: ${minsToHM(totalMin)}`);
+  linhas.push(`Valor bruto: R$ ${totalBruto.toFixed(2)}`);
+  if (totalDescontos > 0) linhas.push(`Descontos: - R$ ${totalDescontos.toFixed(2)}`);
+  if (valesUsados > 0) linhas.push(`Vales: - R$ ${valesUsados.toFixed(2)}`);
+  linhas.push(`-----------------------------`);
+  linhas.push(`Valor líquido a receber: R$ ${valorFinal.toFixed(2)}`);
+  return linhas.join("\n");
+}
+
 /* =========================================================================
    ADMIN — FINANCEIRO (fechamento de diária/hora, pagamentos e vales)
    ========================================================================= */
@@ -1192,6 +1230,9 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
   const [subTab, setSubTab] = useState("pendentes");
   const [valeModal, setValeModal] = useState(false);
   const [valeFunc, setValeFunc] = useState(""), [valeValor, setValeValor] = useState(""), [valeData, setValeData] = useState(todayStr()), [valeMotivo, setValeMotivo] = useState("");
+  const [descontoModal, setDescontoModal] = useState(null);
+  const [descMotivo, setDescMotivo] = useState(""), [descValor, setDescValor] = useState("");
+  const [resumoFuncId, setResumoFuncId] = useState(null);
 
   const sessions = useMemo(() => computeSessions(registros), [registros]);
 
@@ -1217,7 +1258,7 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
     setFechamentos([...fechamentos, {
       id: uid(), funcionarioId: dia.funcionarioId, funcionarioNome: dia.funcionarioNome, data: dia.data,
       tipoPagamento: tipo, minutosTrabalhados: dia.totalMin, valorUsado: tipo === "diaria" ? valorDiaria : valorHora,
-      valorCalculado, pago: false, dataPagamento: null, criadoEm: new Date().toISOString(),
+      valorCalculado, descontos: [], pago: false, dataPagamento: null, criadoEm: new Date().toISOString(),
     }]);
     notify(`Dia ${fmtBR(dia.data)} de ${dia.funcionarioNome} fechado como ${tipo === "diaria" ? "diária" : "hora"}: R$ ${valorCalculado.toFixed(2)}.`);
   }
@@ -1226,21 +1267,34 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
   function marcarPendente(f) { setFechamentos(fechamentos.map((x) => (x.id === f.id ? { ...x, pago: false, dataPagamento: null } : x))); }
   function excluirFechamento(f) { setFechamentos(fechamentos.filter((x) => x.id !== f.id)); }
 
+  function salvarDesconto() {
+    if (!descValor || Number(descValor) <= 0) { notify("Informe um valor de desconto válido.", "error"); return; }
+    setFechamentos(fechamentos.map((f) => (f.id === descontoModal.id
+      ? { ...f, descontos: [...(f.descontos || []), { id: uid(), motivo: descMotivo.trim(), valor: Number(descValor) }] }
+      : f)));
+    setDescontoModal(null); setDescMotivo(""); setDescValor("");
+  }
+  function removerDesconto(fechamentoId, descontoId) {
+    setFechamentos(fechamentos.map((f) => (f.id === fechamentoId ? { ...f, descontos: (f.descontos || []).filter((d) => d.id !== descontoId) } : f)));
+  }
+
   function salvarVale() {
     if (!valeFunc || !valeValor || Number(valeValor) <= 0) { notify("Preencha funcionário e um valor válido.", "error"); return; }
     const funcionario = funcionarios.find((f) => f.id === valeFunc);
-    setVales([...vales, { id: uid(), funcionarioId: valeFunc, funcionarioNome: funcionario.nome, valor: Number(valeValor), data: valeData, motivo: valeMotivo.trim(), criadoEm: new Date().toISOString() }]);
+    setVales([...vales, { id: uid(), funcionarioId: valeFunc, funcionarioNome: funcionario.nome, valor: Number(valeValor), data: valeData, motivo: valeMotivo.trim(), quitado: false, dataQuitacao: null, criadoEm: new Date().toISOString() }]);
     setValeModal(false); setValeFunc(""); setValeValor(""); setValeMotivo("");
   }
   function excluirVale(v) { setVales(vales.filter((x) => x.id !== v.id)); }
+  function reabrirVale(v) { setVales(vales.map((x) => (x.id === v.id ? { ...x, quitado: false, dataQuitacao: null } : x))); }
 
   const saldos = useMemo(() => funcionarios.map((f) => {
     const fechs = fechamentos.filter((x) => x.funcionarioId === f.id);
-    const pendente = fechs.filter((x) => !x.pago).reduce((a, x) => a + x.valorCalculado, 0);
-    const pago = fechs.filter((x) => x.pago).reduce((a, x) => a + x.valorCalculado, 0);
-    const totalVales = vales.filter((v) => v.funcionarioId === f.id).reduce((a, v) => a + v.valor, 0);
-    return { funcionario: f, pendente, pago, totalVales, saldo: pendente - totalVales };
-  }).filter((s) => s.pendente > 0 || s.pago > 0 || s.totalVales > 0), [funcionarios, fechamentos, vales]);
+    const pendente = fechs.filter((x) => !x.pago).reduce((a, x) => a + valorLiquidoFechamento(x), 0);
+    const pago = fechs.filter((x) => x.pago).reduce((a, x) => a + valorLiquidoFechamento(x), 0);
+    const valesPendentes = vales.filter((v) => v.funcionarioId === f.id && !v.quitado).reduce((a, v) => a + v.valor, 0);
+    const valesQuitados = vales.filter((v) => v.funcionarioId === f.id && v.quitado).reduce((a, v) => a + v.valor, 0);
+    return { funcionario: f, pendente, pago, valesPendentes, valesQuitados, saldo: pendente - valesPendentes };
+  }).filter((s) => s.pendente > 0 || s.pago > 0 || s.valesPendentes > 0 || s.valesQuitados > 0), [funcionarios, fechamentos, vales]);
 
   const totalAReceberGeral = saldos.reduce((a, s) => a + s.saldo, 0);
 
@@ -1257,22 +1311,29 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-5">
         <div className="bg-slate-900 text-white rounded-xl p-4"><div className="text-xs text-white/50 font-bold uppercase">Saldo total a pagar</div><div className="text-2xl font-black mt-1">R$ {totalAReceberGeral.toFixed(2)}</div></div>
         <div className="bg-white border border-slate-200 rounded-xl p-4"><div className="text-xs text-slate-400 font-bold uppercase">Dias sem fechar</div><div className="text-2xl font-black mt-1 text-slate-800">{diasPendentes.length}</div></div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4"><div className="text-xs text-slate-400 font-bold uppercase">Vales no total</div><div className="text-2xl font-black mt-1 text-slate-800">R$ {vales.reduce((a, v) => a + v.valor, 0).toFixed(2)}</div></div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4"><div className="text-xs text-slate-400 font-bold uppercase">Vales pendentes</div><div className="text-2xl font-black mt-1 text-slate-800">R$ {vales.filter((v) => !v.quitado).reduce((a, v) => a + v.valor, 0).toFixed(2)}</div></div>
       </div>
 
       {saldos.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden mb-5">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold"><tr><th className="text-left px-3 py-2.5">Funcionário</th><th className="text-right px-3 py-2.5">A receber</th><th className="text-right px-3 py-2.5">Já pago</th><th className="text-right px-3 py-2.5">Vales</th><th className="text-right px-3 py-2.5">Saldo</th></tr></thead>
+              <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold"><tr><th className="text-left px-3 py-2.5">Funcionário</th><th className="text-right px-3 py-2.5">A receber</th><th className="text-right px-3 py-2.5">Já pago</th><th className="text-right px-3 py-2.5">Vales pendentes</th><th className="text-right px-3 py-2.5">Saldo</th><th className="px-3 py-2.5"></th></tr></thead>
               <tbody className="divide-y divide-slate-100">
                 {saldos.map((s) => (
                   <tr key={s.funcionario.id}>
                     <td className="px-3 py-2.5 font-semibold text-slate-800">{s.funcionario.nome}</td>
                     <td className="px-3 py-2.5 text-right">R$ {s.pendente.toFixed(2)}</td>
                     <td className="px-3 py-2.5 text-right text-slate-500">R$ {s.pago.toFixed(2)}</td>
-                    <td className="px-3 py-2.5 text-right text-rose-500">- R$ {s.totalVales.toFixed(2)}</td>
+                    <td className="px-3 py-2.5 text-right text-rose-500">- R$ {s.valesPendentes.toFixed(2)}</td>
                     <td className={`px-3 py-2.5 text-right font-bold ${s.saldo < 0 ? "text-rose-600" : "text-emerald-600"}`}>R$ {s.saldo.toFixed(2)}</td>
+                    <td className="px-3 py-2.5 text-right">
+                      {s.pendente > 0 && (
+                        <button onClick={() => setResumoFuncId(s.funcionario.id)} className="flex items-center gap-1 text-xs font-bold text-sky-600 hover:text-sky-800">
+                          <Receipt className="w-3.5 h-3.5" /> Fechar pagamento
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1333,25 +1394,39 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
                 <tr><th className="text-left px-3 py-2.5">Data</th><th className="text-left px-3 py-2.5">Funcionário</th><th className="text-left px-3 py-2.5">Tipo</th><th className="text-right px-3 py-2.5">Valor</th><th className="text-left px-3 py-2.5">Status</th><th className="text-left px-3 py-2.5"></th></tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {fechamentos.slice().sort((a, b) => b.data.localeCompare(a.data)).map((f) => (
-                  <tr key={f.id} className="hover:bg-slate-50">
-                    <td className="px-3 py-2.5 whitespace-nowrap">{fmtBR(f.data)}</td>
-                    <td className="px-3 py-2.5 whitespace-nowrap">{f.funcionarioNome}</td>
-                    <td className="px-3 py-2.5 whitespace-nowrap">{f.tipoPagamento === "diaria" ? "Diária" : "Por hora"}</td>
-                    <td className="px-3 py-2.5 whitespace-nowrap text-right font-bold">R$ {f.valorCalculado.toFixed(2)}</td>
-                    <td className="px-3 py-2.5 whitespace-nowrap">
-                      <span className={`text-xs font-bold px-2 py-1 rounded-full ${f.pago ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{f.pago ? `Pago em ${fmtBR(f.dataPagamento)}` : "Pendente"}</span>
-                    </td>
-                    <td className="px-3 py-2.5 whitespace-nowrap">
-                      <div className="flex items-center gap-2">
-                        {f.pago
-                          ? <button onClick={() => marcarPendente(f)} className="text-xs font-bold text-slate-500 hover:text-slate-700">Reabrir</button>
-                          : <button onClick={() => marcarPago(f)} className="text-xs font-bold text-emerald-600 hover:text-emerald-800">Marcar pago</button>}
-                        <button onClick={() => excluirFechamento(f)} className="text-slate-400 hover:text-rose-600"><Trash2 className="w-4 h-4" /></button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {fechamentos.slice().sort((a, b) => b.data.localeCompare(a.data)).map((f) => {
+                  const liquido = valorLiquidoFechamento(f);
+                  const temDesconto = (f.descontos || []).length > 0;
+                  return (
+                    <tr key={f.id} className="hover:bg-slate-50 align-top">
+                      <td className="px-3 py-2.5 whitespace-nowrap">{fmtBR(f.data)}</td>
+                      <td className="px-3 py-2.5 whitespace-nowrap">{f.funcionarioNome}</td>
+                      <td className="px-3 py-2.5 whitespace-nowrap">{f.tipoPagamento === "diaria" ? "Diária" : "Por hora"}</td>
+                      <td className="px-3 py-2.5 whitespace-nowrap text-right">
+                        <div className="font-bold">R$ {liquido.toFixed(2)}</div>
+                        {temDesconto && <div className="text-xs text-slate-400 line-through">R$ {f.valorCalculado.toFixed(2)}</div>}
+                        {(f.descontos || []).map((d) => (
+                          <div key={d.id} className="text-[11px] text-rose-500 flex items-center justify-end gap-1">
+                            - R$ {d.valor.toFixed(2)} {d.motivo && `(${d.motivo})`}
+                            {!f.pago && <button onClick={() => removerDesconto(f.id, d.id)} className="text-slate-300 hover:text-rose-600"><X className="w-3 h-3" /></button>}
+                          </div>
+                        ))}
+                      </td>
+                      <td className="px-3 py-2.5 whitespace-nowrap">
+                        <span className={`text-xs font-bold px-2 py-1 rounded-full ${f.pago ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{f.pago ? `Pago em ${fmtBR(f.dataPagamento)}` : "Pendente"}</span>
+                      </td>
+                      <td className="px-3 py-2.5 whitespace-nowrap">
+                        <div className="flex items-center gap-2">
+                          {!f.pago && <button onClick={() => setDescontoModal(f)} className="text-xs font-bold text-slate-500 hover:text-slate-700">+ Desconto</button>}
+                          {f.pago
+                            ? <button onClick={() => marcarPendente(f)} className="text-xs font-bold text-slate-500 hover:text-slate-700">Reabrir</button>
+                            : <button onClick={() => marcarPago(f)} className="text-xs font-bold text-emerald-600 hover:text-emerald-800">Marcar pago</button>}
+                          <button onClick={() => excluirFechamento(f)} className="text-slate-400 hover:text-rose-600"><Trash2 className="w-4 h-4" /></button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
                 {fechamentos.length === 0 && <tr><td colSpan={6} className="text-center py-8 text-slate-400">Nenhum dia fechado ainda.</td></tr>}
               </tbody>
             </table>
@@ -1367,7 +1442,7 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
           <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
-                <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold"><tr><th className="text-left px-3 py-2.5">Data</th><th className="text-left px-3 py-2.5">Funcionário</th><th className="text-left px-3 py-2.5">Motivo</th><th className="text-right px-3 py-2.5">Valor</th><th className="text-left px-3 py-2.5"></th></tr></thead>
+                <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold"><tr><th className="text-left px-3 py-2.5">Data</th><th className="text-left px-3 py-2.5">Funcionário</th><th className="text-left px-3 py-2.5">Motivo</th><th className="text-right px-3 py-2.5">Valor</th><th className="text-left px-3 py-2.5">Status</th><th className="text-left px-3 py-2.5"></th></tr></thead>
                 <tbody className="divide-y divide-slate-100">
                   {vales.slice().sort((a, b) => b.data.localeCompare(a.data)).map((v) => (
                     <tr key={v.id} className="hover:bg-slate-50">
@@ -1375,10 +1450,18 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
                       <td className="px-3 py-2.5 whitespace-nowrap">{v.funcionarioNome}</td>
                       <td className="px-3 py-2.5">{v.motivo || "-"}</td>
                       <td className="px-3 py-2.5 whitespace-nowrap text-right font-bold text-rose-600">R$ {v.valor.toFixed(2)}</td>
-                      <td className="px-3 py-2.5"><button onClick={() => excluirVale(v)} className="text-slate-400 hover:text-rose-600"><Trash2 className="w-4 h-4" /></button></td>
+                      <td className="px-3 py-2.5 whitespace-nowrap">
+                        <span className={`text-xs font-bold px-2 py-1 rounded-full ${v.quitado ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{v.quitado ? `Quitado em ${fmtBR(v.dataQuitacao)}` : "Pendente"}</span>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <div className="flex items-center gap-2">
+                          {v.quitado && <button onClick={() => reabrirVale(v)} className="text-xs font-bold text-slate-500 hover:text-slate-700">Reabrir</button>}
+                          <button onClick={() => excluirVale(v)} className="text-slate-400 hover:text-rose-600"><Trash2 className="w-4 h-4" /></button>
+                        </div>
+                      </td>
                     </tr>
                   ))}
-                  {vales.length === 0 && <tr><td colSpan={5} className="text-center py-8 text-slate-400">Nenhum vale registrado.</td></tr>}
+                  {vales.length === 0 && <tr><td colSpan={6} className="text-center py-8 text-slate-400">Nenhum vale registrado.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -1399,11 +1482,120 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
             <Field label="Data"><input type="date" className={inputCls} value={valeData} onChange={(e) => setValeData(e.target.value)} /></Field>
           </div>
           <Field label="Motivo (opcional)"><input className={inputCls} value={valeMotivo} onChange={(e) => setValeMotivo(e.target.value)} placeholder="Ex: adiantamento pedido pelo funcionário" /></Field>
-          <div className="text-xs text-slate-400 mb-3">O valor é descontado automaticamente do saldo a receber do funcionário.</div>
+          <div className="text-xs text-slate-400 mb-3">O valor fica pendente e é descontado automaticamente no próximo fechamento de pagamento desse funcionário.</div>
           <button onClick={salvarVale} className="w-full bg-slate-900 text-white font-bold py-3 rounded-lg">Registrar vale</button>
         </Modal>
       )}
+
+      {descontoModal && (
+        <Modal title="Adicionar desconto ao dia" onClose={() => setDescontoModal(null)}>
+          <div className="text-sm text-slate-500 mb-4 bg-slate-50 rounded-lg px-3 py-2.5">{descontoModal.funcionarioNome} — {fmtBR(descontoModal.data)}</div>
+          <Field label="Motivo"><input className={inputCls} value={descMotivo} onChange={(e) => setDescMotivo(e.target.value)} placeholder="Ex: Marmita fornecida pela empresa" /></Field>
+          <Field label="Valor (R$)"><input type="number" step="0.01" className={inputCls} value={descValor} onChange={(e) => setDescValor(e.target.value)} /></Field>
+          <button onClick={salvarDesconto} className="w-full bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold py-3 rounded-lg">Adicionar desconto</button>
+        </Modal>
+      )}
+
+      {resumoFuncId && (
+        <ModalResumoPagamento
+          funcionario={funcionarios.find((f) => f.id === resumoFuncId)}
+          fechamentos={fechamentos} vales={vales} setFechamentos={setFechamentos} setVales={setVales}
+          notify={notify}
+          onClose={() => setResumoFuncId(null)}
+        />
+      )}
     </div>
+  );
+}
+
+/* ---------- Resumo de fechamento de pagamento (para enviar ao funcionário) ---------- */
+function ModalResumoPagamento({ funcionario, fechamentos, vales, setFechamentos, setVales, notify, onClose }) {
+  const itens = fechamentos.filter((f) => f.funcionarioId === funcionario.id && !f.pago).sort((a, b) => a.data.localeCompare(b.data));
+  const valesPendentes = vales.filter((v) => v.funcionarioId === funcionario.id && !v.quitado);
+
+  const totalMin = itens.reduce((a, f) => a + f.minutosTrabalhados, 0);
+  const totalBruto = itens.reduce((a, f) => a + f.valorCalculado, 0);
+  const totalDescontos = itens.reduce((a, f) => a + (f.descontos || []).reduce((s, d) => s + d.valor, 0), 0);
+  const totalVales = valesPendentes.reduce((a, v) => a + v.valor, 0);
+  const valorFinal = totalBruto - totalDescontos - totalVales;
+
+  const texto = gerarTextoResumo({ funcionario, itens, totalMin, totalBruto, totalDescontos, valesUsados: totalVales, valorFinal });
+
+  function copiar() {
+    navigator.clipboard?.writeText(texto).then(
+      () => notify("Resumo copiado! Pode colar no WhatsApp."),
+      () => notify("Não foi possível copiar automaticamente.", "error")
+    );
+  }
+  async function compartilhar() {
+    if (navigator.share) {
+      try { await navigator.share({ text: texto, title: "Fechamento de pagamento" }); } catch {}
+    } else {
+      copiar();
+    }
+  }
+  function confirmarPagamento() {
+    const hoje = todayStr();
+    setFechamentos(fechamentos.map((f) => (itens.some((i) => i.id === f.id) ? { ...f, pago: true, dataPagamento: hoje } : f)));
+    setVales(vales.map((v) => (valesPendentes.some((vp) => vp.id === v.id) ? { ...v, quitado: true, dataQuitacao: hoje } : v)));
+    notify(`Pagamento de ${funcionario.nome} confirmado: R$ ${valorFinal.toFixed(2)}.`);
+    onClose();
+  }
+
+  return (
+    <Modal title={`Fechar pagamento — ${funcionario.nome}`} onClose={onClose} wide>
+      {itens.length === 0 ? (
+        <div className="text-sm text-slate-400 text-center py-6">Nenhum dia pendente de pagamento para este funcionário.</div>
+      ) : (
+        <>
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden mb-4">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold"><tr><th className="text-left px-3 py-2">Data</th><th className="text-left px-3 py-2">Tipo</th><th className="text-left px-3 py-2">Horas</th><th className="text-right px-3 py-2">Valor</th></tr></thead>
+                <tbody className="divide-y divide-slate-100">
+                  {itens.map((f) => (
+                    <tr key={f.id}>
+                      <td className="px-3 py-2 whitespace-nowrap">{fmtBR(f.data)}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">{f.tipoPagamento === "diaria" ? "Diária" : "Por hora"}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">{minsToHM(f.minutosTrabalhados)}</td>
+                      <td className="px-3 py-2 whitespace-nowrap text-right">
+                        R$ {f.valorCalculado.toFixed(2)}
+                        {(f.descontos || []).map((d) => <div key={d.id} className="text-[11px] text-rose-500">- R$ {d.valor.toFixed(2)} {d.motivo && `(${d.motivo})`}</div>)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 mb-4 text-sm">
+            <div className="bg-slate-50 rounded-lg px-3 py-2.5 flex justify-between"><span className="text-slate-500">Dias trabalhados</span><span className="font-bold">{itens.length}</span></div>
+            <div className="bg-slate-50 rounded-lg px-3 py-2.5 flex justify-between"><span className="text-slate-500">Total de horas</span><span className="font-bold">{minsToHM(totalMin)}</span></div>
+            <div className="bg-slate-50 rounded-lg px-3 py-2.5 flex justify-between"><span className="text-slate-500">Valor bruto</span><span className="font-bold">R$ {totalBruto.toFixed(2)}</span></div>
+            <div className="bg-slate-50 rounded-lg px-3 py-2.5 flex justify-between"><span className="text-slate-500">Descontos + vales</span><span className="font-bold text-rose-600">- R$ {(totalDescontos + totalVales).toFixed(2)}</span></div>
+          </div>
+
+          <div className="bg-slate-900 text-white rounded-xl p-4 flex justify-between items-center mb-4">
+            <span className="text-sm font-bold uppercase text-white/60">Valor líquido a receber</span>
+            <span className="text-2xl font-black text-amber-400">R$ {valorFinal.toFixed(2)}</span>
+          </div>
+
+          <textarea readOnly value={texto} rows={8} className="w-full text-xs font-mono border border-slate-200 rounded-lg p-3 mb-3 bg-slate-50" />
+
+          <div className="flex gap-2 mb-4">
+            <button onClick={copiar} className="flex-1 rounded-lg border border-slate-300 py-2.5 text-sm font-bold text-slate-700">Copiar resumo</button>
+            <button onClick={compartilhar} className="flex-1 rounded-lg border border-slate-300 py-2.5 text-sm font-bold text-slate-700">Compartilhar</button>
+          </div>
+
+          <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4 text-xs text-amber-700">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" /> Ao confirmar, todos os dias acima são marcados como pagos e os vales pendentes são quitados. Dá pra reabrir depois, se precisar.
+          </div>
+
+          <button onClick={confirmarPagamento} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-lg">Confirmar pagamento</button>
+        </>
+      )}
+    </Modal>
   );
 }
 
