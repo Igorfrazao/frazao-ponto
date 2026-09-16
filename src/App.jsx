@@ -103,8 +103,10 @@ function getLocation() {
 }
 
 /* ---------- State machine ---------- */
-function getFuncionarioState(funcionarioId, registros) {
-  const list = registros.filter((r) => r.funcionarioId === funcionarioId).sort((a, b) => eventoKey(a).localeCompare(eventoKey(b)));
+function getFuncionarioState(funcionarioId, registros, ateData = null) {
+  const list = registros
+    .filter((r) => r.funcionarioId === funcionarioId && (!ateData || r.data <= ateData))
+    .sort((a, b) => eventoKey(a).localeCompare(eventoKey(b)));
   let status = "sem_entrada", obraId = null, obraNome = null;
   for (const r of list) {
     if (r.tipo === "entrada") { status = "trabalhando"; obraId = r.obraId; obraNome = r.obraNome; }
@@ -313,13 +315,15 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
   const [trocando, setTrocando] = useState(false);
   const [enviarLocalizacao, setEnviarLocalizacao] = useState(false);
   const [horaManual, setHoraManual] = useState(timeStr());
+  const [dataRegistro, setDataRegistro] = useState(todayStr());
 
   const ativos = funcionarios.filter((f) => f.status === "Ativo");
   const obrasAtivas = obras.filter((o) => o.status === "Ativa");
   const funcionario = ativos.find((f) => f.id === funcionarioId) || null;
-  const estado = funcionarioId ? getFuncionarioState(funcionarioId, registros) : null;
+  const estado = funcionarioId ? getFuncionarioState(funcionarioId, registros, dataRegistro) : null;
+  const dataDiferente = dataRegistro !== todayStr();
 
-  useEffect(() => { setObraSelecionada(""); setTrocando(false); setPinDigitado(""); setPinOk(false); }, [funcionarioId]);
+  useEffect(() => { setObraSelecionada(""); setTrocando(false); setPinDigitado(""); setPinOk(false); setDataRegistro(todayStr()); }, [funcionarioId]);
 
   const acaoLabel = { entrada: "Entrada", inicio_intervalo: "Início do intervalo", fim_intervalo: "Fim do intervalo", troca_obra: "Troca de obra", saida: "Saída" };
 
@@ -346,12 +350,12 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
     const horarioFinal = horaManual || horarioReal;
     const registro = {
       id: uid(), funcionarioId: funcionario.id, funcionarioNome: funcionario.nome, obraId, obraNome, tipo: acao,
-      data: todayStr(now), horario: horarioFinal, localizacaoDisponivel: loc.disponivel,
+      data: dataRegistro, horario: horarioFinal, localizacaoDisponivel: loc.disponivel,
       lat: loc.lat ?? null, lng: loc.lng ?? null, precisao: loc.precisao ?? null, endereco: loc.endereco ?? null,
-      criadoEm: now.toISOString(), horarioAjustado: horarioFinal !== horarioReal,
+      criadoEm: now.toISOString(), horarioAjustado: horarioFinal !== horarioReal, dataAjustada: dataRegistro !== todayStr(now),
     };
     onRegistrar(registro);
-    notify(`${acaoLabel[acao]} registrada às ${registro.horario}${!loc.disponivel ? " (sem localização)" : ""}.`);
+    notify(`${acaoLabel[acao]} registrada ${dataRegistro !== todayStr() ? `em ${fmtBR(dataRegistro)} ` : ""}às ${registro.horario}${!loc.disponivel ? " (sem localização)" : ""}.`);
     setTrocando(false);
     if (acao === "saida") { setFuncionarioId(""); setObraSelecionada(""); setPinOk(false); }
   }
@@ -400,6 +404,21 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
                 autoFocus placeholder="••••"
               />
               <button onClick={confirmarPin} className="w-full mt-3 rounded-lg bg-slate-900 text-white font-bold py-3">Confirmar PIN</button>
+            </Field>
+          )}
+
+          {funcionario && pinOk && (
+            <Field label="Data do registro">
+              <input
+                type="date" className={inputCls} value={dataRegistro} max={todayStr()}
+                onChange={(e) => setDataRegistro(e.target.value)}
+              />
+              <div className="text-xs text-slate-400 mt-1">Deixe em hoje para o uso normal. Só altere se estiver lançando o ponto de um dia anterior.</div>
+              {dataDiferente && (
+                <div className="mt-2 flex items-center gap-1.5 text-xs font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2">
+                  <CalendarPlus className="w-3.5 h-3.5" /> Lançando para {fmtBR(dataRegistro)} — os botões abaixo refletem a situação do funcionário nesse dia.
+                </div>
+              )}
             </Field>
           )}
 
@@ -475,6 +494,7 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
           </div>
           <div className="text-center text-[11px] text-slate-400 mb-4">Toque no horário para ajustar manualmente, se precisar.</div>
           <div className="space-y-3 text-sm">
+            <div className="flex justify-between border-b border-slate-100 pb-2"><span className="text-slate-500">Data</span><span className={`font-bold ${dataDiferente ? "text-sky-600" : "text-slate-900"}`}>{fmtBR(dataRegistro)}{dataDiferente && " (retroativo)"}</span></div>
             <div className="flex justify-between border-b border-slate-100 pb-2"><span className="text-slate-500">Funcionário</span><span className="font-bold text-slate-900">{funcionario?.nome}</span></div>
             <div className="flex justify-between border-b border-slate-100 pb-2">
               <span className="text-slate-500">Obra</span>
@@ -834,7 +854,10 @@ function AbaPontos({ registros, setRegistros, funcionarios, obras, edicoes, setE
                 const Icon = TIPO_ICON[r.tipo]; const editado = edicoes.some((e) => e.registroId === r.id);
                 return (
                   <tr key={r.id} className="hover:bg-slate-50">
-                    <td className="px-3 py-2.5 whitespace-nowrap">{fmtBR(r.data)}</td>
+                    <td className="px-3 py-2.5 whitespace-nowrap">
+                      {fmtBR(r.data)}
+                      {r.dataAjustada && <span className="ml-1 text-sky-500" title="Data escolhida manualmente pelo funcionário (registro retroativo pela tela normal)">📅</span>}
+                    </td>
                     <td className="px-3 py-2.5 whitespace-nowrap">{r.funcionarioNome}</td>
                     <td className="px-3 py-2.5 whitespace-nowrap">{r.obraNome || "-"}</td>
                     <td className="px-3 py-2.5 whitespace-nowrap"><span className="flex items-center gap-1"><Icon className="w-3.5 h-3.5 text-slate-400" />{TIPOS[r.tipo]}</span></td>
@@ -1202,9 +1225,10 @@ function valorLiquidoFechamento(f) {
   return f.valorCalculado - descontos.reduce((a, d) => a + d.valor, 0);
 }
 
-function gerarTextoResumo({ funcionario, itens, totalMin, totalBruto, totalDescontos, valesUsados, valorFinal }) {
+function gerarTextoResumo({ funcionario, itens, totalMin, totalBruto, totalDescontos, valesUsados, valorFinal, titulo, periodoTexto }) {
   const linhas = [];
-  linhas.push(`📋 Fechamento de pagamento — ${funcionario.nome}`);
+  linhas.push(`📋 ${titulo || "Fechamento de pagamento"} — ${funcionario.nome}`);
+  if (periodoTexto) linhas.push(`Período: ${periodoTexto}`);
   linhas.push("");
   itens.forEach((f) => {
     const tipo = f.tipoPagamento === "diaria" ? "Diária" : "Por hora";
@@ -1218,7 +1242,7 @@ function gerarTextoResumo({ funcionario, itens, totalMin, totalBruto, totalDesco
   if (totalDescontos > 0) linhas.push(`Descontos: - R$ ${totalDescontos.toFixed(2)}`);
   if (valesUsados > 0) linhas.push(`Vales: - R$ ${valesUsados.toFixed(2)}`);
   linhas.push(`-----------------------------`);
-  linhas.push(`Valor líquido a receber: R$ ${valorFinal.toFixed(2)}`);
+  linhas.push(`Valor líquido: R$ ${valorFinal.toFixed(2)}`);
   return linhas.join("\n");
 }
 
@@ -1233,6 +1257,10 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
   const [descontoModal, setDescontoModal] = useState(null);
   const [descMotivo, setDescMotivo] = useState(""), [descValor, setDescValor] = useState("");
   const [resumoFuncId, setResumoFuncId] = useState(null);
+  const [histFunc, setHistFunc] = useState("");
+  const [histIni, setHistIni] = useState("");
+  const [histFim, setHistFim] = useState("");
+  const [verResumoHistorico, setVerResumoHistorico] = useState(false);
 
   const sessions = useMemo(() => computeSessions(registros), [registros]);
 
@@ -1302,6 +1330,7 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
     { id: "pendentes", label: `Dias a fechar (${diasPendentes.length})` },
     { id: "fechamentos", label: "Fechamentos" },
     { id: "vales", label: "Vales" },
+    { id: "historico", label: "Histórico de pagamentos" },
   ];
 
   return (
@@ -1318,7 +1347,7 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden mb-5">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold"><tr><th className="text-left px-3 py-2.5">Funcionário</th><th className="text-right px-3 py-2.5">A receber</th><th className="text-right px-3 py-2.5">Já pago</th><th className="text-right px-3 py-2.5">Vales pendentes</th><th className="text-right px-3 py-2.5">Saldo</th><th className="px-3 py-2.5"></th></tr></thead>
+              <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold"><tr><th className="text-left px-3 py-2.5">Funcionário</th><th className="text-right px-3 py-2.5">A receber</th><th className="text-right px-3 py-2.5">Já pago</th><th className="text-right px-3 py-2.5">Vales a descontar</th><th className="text-right px-3 py-2.5">Saldo</th><th className="px-3 py-2.5"></th></tr></thead>
               <tbody className="divide-y divide-slate-100">
                 {saldos.map((s) => (
                   <tr key={s.funcionario.id}>
@@ -1436,6 +1465,10 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
 
       {subTab === "vales" && (
         <div>
+          <div className="flex items-start gap-2 bg-sky-50 border border-sky-200 rounded-lg p-3 mb-3 text-xs text-sky-700">
+            <CircleDollarSign className="w-4 h-4 shrink-0 mt-0.5" />
+            Todo vale desconta automaticamente do saldo a receber do funcionário assim que é criado. "Aguardando abatimento" significa que ele ainda está reduzindo o saldo atual; quando você fecha um pagamento, os vales usados nele passam para "Já abatido" e não descontam de novo depois.
+          </div>
           <div className="flex justify-end mb-3">
             <button onClick={() => setValeModal(true)} className="flex items-center gap-1.5 bg-slate-900 text-white text-sm font-bold px-3.5 py-2 rounded-lg"><Plus className="w-4 h-4" /> Novo vale</button>
           </div>
@@ -1451,7 +1484,9 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
                       <td className="px-3 py-2.5">{v.motivo || "-"}</td>
                       <td className="px-3 py-2.5 whitespace-nowrap text-right font-bold text-rose-600">R$ {v.valor.toFixed(2)}</td>
                       <td className="px-3 py-2.5 whitespace-nowrap">
-                        <span className={`text-xs font-bold px-2 py-1 rounded-full ${v.quitado ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{v.quitado ? `Quitado em ${fmtBR(v.dataQuitacao)}` : "Pendente"}</span>
+                        <span className={`text-xs font-bold px-2 py-1 rounded-full ${v.quitado ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`} title={v.quitado ? "Esse vale já foi descontado num pagamento fechado" : "Esse vale já está reduzindo o saldo a receber do funcionário agora"}>
+                          {v.quitado ? `Já abatido em pagamento de ${fmtBR(v.dataQuitacao)}` : "Aguardando abatimento"}
+                        </span>
                       </td>
                       <td className="px-3 py-2.5">
                         <div className="flex items-center gap-2">
@@ -1466,6 +1501,85 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
               </table>
             </div>
           </div>
+        </div>
+      )}
+
+      {subTab === "historico" && (
+        <div>
+          <div className="bg-white rounded-xl border border-slate-200 p-3 mb-4 grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <select className={inputCls + " text-sm"} value={histFunc} onChange={(e) => setHistFunc(e.target.value)}>
+              <option value="">Selecione o funcionário</option>
+              {funcionarios.map((f) => <option key={f.id} value={f.id}>{f.nome}</option>)}
+            </select>
+            <input type="date" className={inputCls + " text-sm"} value={histIni} onChange={(e) => setHistIni(e.target.value)} placeholder="De" />
+            <input type="date" className={inputCls + " text-sm"} value={histFim} onChange={(e) => setHistFim(e.target.value)} placeholder="Até" />
+          </div>
+
+          {(() => {
+            const itensPagos = fechamentos
+              .filter((f) => f.pago)
+              .filter((f) => !histFunc || f.funcionarioId === histFunc)
+              .filter((f) => !histIni || f.dataPagamento >= histIni)
+              .filter((f) => !histFim || f.dataPagamento <= histFim)
+              .sort((a, b) => a.data.localeCompare(b.data));
+
+            if (!histFunc) {
+              return <div className="bg-white border border-slate-200 rounded-xl p-6 text-center text-slate-400 text-sm">Selecione um funcionário para consultar o histórico de pagamentos.</div>;
+            }
+            if (itensPagos.length === 0) {
+              return <div className="bg-white border border-slate-200 rounded-xl p-6 text-center text-slate-400 text-sm">Nenhum pagamento encontrado nesse período.</div>;
+            }
+
+            const totalMin = itensPagos.reduce((a, f) => a + f.minutosTrabalhados, 0);
+            const totalBruto = itensPagos.reduce((a, f) => a + f.valorCalculado, 0);
+            const totalDescontos = itensPagos.reduce((a, f) => a + (f.descontos || []).reduce((s, d) => s + d.valor, 0), 0);
+            const totalLiquido = itensPagos.reduce((a, f) => a + valorLiquidoFechamento(f), 0);
+            const funcionario = funcionarios.find((f) => f.id === histFunc);
+
+            return (
+              <>
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden mb-4">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold"><tr><th className="text-left px-3 py-2">Data trabalhada</th><th className="text-left px-3 py-2">Tipo</th><th className="text-left px-3 py-2">Horas</th><th className="text-left px-3 py-2">Pago em</th><th className="text-right px-3 py-2">Valor líquido</th></tr></thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {itensPagos.map((f) => (
+                          <tr key={f.id}>
+                            <td className="px-3 py-2 whitespace-nowrap">{fmtBR(f.data)}</td>
+                            <td className="px-3 py-2 whitespace-nowrap">{f.tipoPagamento === "diaria" ? "Diária" : "Por hora"}</td>
+                            <td className="px-3 py-2 whitespace-nowrap">{minsToHM(f.minutosTrabalhados)}</td>
+                            <td className="px-3 py-2 whitespace-nowrap text-slate-500">{fmtBR(f.dataPagamento)}</td>
+                            <td className="px-3 py-2 whitespace-nowrap text-right font-bold">R$ {valorLiquidoFechamento(f).toFixed(2)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+                  <div className="bg-white border border-slate-200 rounded-xl p-3 text-center"><div className="text-lg font-black text-slate-800">{itensPagos.length}</div><div className="text-xs text-slate-400 font-semibold">Dias pagos</div></div>
+                  <div className="bg-white border border-slate-200 rounded-xl p-3 text-center"><div className="text-lg font-black text-slate-800">{minsToHM(totalMin)}</div><div className="text-xs text-slate-400 font-semibold">Total de horas</div></div>
+                  <div className="bg-white border border-slate-200 rounded-xl p-3 text-center"><div className="text-lg font-black text-slate-800">R$ {totalDescontos.toFixed(2)}</div><div className="text-xs text-slate-400 font-semibold">Descontos</div></div>
+                  <div className="bg-slate-900 text-white rounded-xl p-3 text-center"><div className="text-lg font-black text-amber-400">R$ {totalLiquido.toFixed(2)}</div><div className="text-xs text-white/50 font-semibold">Total líquido pago</div></div>
+                </div>
+
+                <button onClick={() => setVerResumoHistorico(true)} className="flex items-center gap-1.5 bg-slate-900 text-white text-sm font-bold px-4 py-2.5 rounded-lg">
+                  <Receipt className="w-4 h-4" /> Gerar resumo do período
+                </button>
+
+                {verResumoHistorico && (
+                  <ModalResumoHistorico
+                    funcionario={funcionario} itens={itensPagos}
+                    totalMin={totalMin} totalBruto={totalBruto} totalDescontos={totalDescontos} totalLiquido={totalLiquido}
+                    periodoTexto={histIni || histFim ? `${histIni ? fmtBR(histIni) : "início"} a ${histFim ? fmtBR(histFim) : "hoje"}` : "todo o histórico"}
+                    notify={notify}
+                    onClose={() => setVerResumoHistorico(false)}
+                  />
+                )}
+              </>
+            );
+          })()}
         </div>
       )}
 
@@ -1589,12 +1703,42 @@ function ModalResumoPagamento({ funcionario, fechamentos, vales, setFechamentos,
           </div>
 
           <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4 text-xs text-amber-700">
-            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" /> Ao confirmar, todos os dias acima são marcados como pagos e os vales pendentes são quitados. Dá pra reabrir depois, se precisar.
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" /> Ao confirmar, todos os dias acima são marcados como pagos e os vales que ainda estavam "aguardando abatimento" passam para "já abatido" neste pagamento. Dá pra reabrir depois, se precisar.
           </div>
 
           <button onClick={confirmarPagamento} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-lg">Confirmar pagamento</button>
         </>
       )}
+    </Modal>
+  );
+}
+
+/* ---------- Resumo de histórico (pagamentos já feitos, filtrado por período) ---------- */
+function ModalResumoHistorico({ funcionario, itens, totalMin, totalBruto, totalDescontos, totalLiquido, periodoTexto, notify, onClose }) {
+  const texto = gerarTextoResumo({
+    funcionario, itens, totalMin, totalBruto, totalDescontos, valesUsados: 0, valorFinal: totalLiquido,
+    titulo: "Resumo de pagamentos", periodoTexto,
+  });
+
+  function copiar() {
+    navigator.clipboard?.writeText(texto).then(
+      () => notify("Resumo copiado! Pode colar no WhatsApp."),
+      () => notify("Não foi possível copiar automaticamente.", "error")
+    );
+  }
+  async function compartilhar() {
+    if (navigator.share) { try { await navigator.share({ text: texto, title: "Resumo de pagamentos" }); } catch {} }
+    else copiar();
+  }
+
+  return (
+    <Modal title={`Resumo do período — ${funcionario.nome}`} onClose={onClose} wide>
+      <div className="text-xs text-slate-400 mb-3">Período: {periodoTexto}</div>
+      <textarea readOnly value={texto} rows={10} className="w-full text-xs font-mono border border-slate-200 rounded-lg p-3 mb-3 bg-slate-50" />
+      <div className="flex gap-2">
+        <button onClick={copiar} className="flex-1 rounded-lg border border-slate-300 py-2.5 text-sm font-bold text-slate-700">Copiar resumo</button>
+        <button onClick={compartilhar} className="flex-1 rounded-lg border border-slate-300 py-2.5 text-sm font-bold text-slate-700">Compartilhar</button>
+      </div>
     </Modal>
   );
 }
