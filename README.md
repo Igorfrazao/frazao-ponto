@@ -1,4 +1,4 @@
-# Frazão Iluminação & Elétrica — Controle de Ponto
+# Gestão de Pontos
 
 Sistema de ponto mobile-first com cadastro de funcionários (com PIN de 4 dígitos),
 cadastro de obras, registro de ponto com GPS, troca de obra no mesmo dia, cálculo
@@ -25,12 +25,18 @@ npm run dev
 
 ## Senha do administrador e PIN dos funcionários
 
-- Senha padrão do painel administrativo: `frazao2026` — troque assim que possível em
+- Senha padrão do painel administrativo: `gestao2026` — troque assim que possível em
   **Painel Administrativo → Configurações**.
 - Cada funcionário pode ter um PIN de 4 dígitos, definido em
   **Painel Administrativo → Funcionários**. O PIN serve para confirmar que é a
   pessoa certa batendo o ponto — não é um mecanismo de segurança forte (fica salvo
   sem criptografia), mas evita erro de toque acidental ou pessoa errada.
+- Cada funcionário também pode ter um **PIN administrativo** (opcional, diferente
+  do PIN normal). Por padrão a data e a hora do registro ficam travadas em "agora".
+  Só quem souber esse segundo PIN consegue desbloquear e ajustar a data/hora de um
+  ponto específico no momento de bater — útil para corrigir um esquecimento sem
+  precisar entrar no painel administrativo. Deixe em branco para nunca permitir
+  alteração por aquele funcionário.
 - Nesta v1 não há login individual real (conforme solicitado). Isso pode ser
   adicionado no futuro sem precisar refazer o sistema.
 

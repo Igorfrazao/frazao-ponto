@@ -15,7 +15,7 @@ import { loadKey, saveKey, configOk } from "./storage";
    ========================================================================= */
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-const DEFAULT_ADMIN_PASSWORD = "frazao2026";
+const DEFAULT_ADMIN_PASSWORD = "gestao2026";
 
 const TIPOS = {
   entrada: "Entrada",
@@ -239,11 +239,11 @@ function Logo({ size = "normal" }) {
   return (
     <div className="flex items-center gap-2.5">
       <div className={`relative ${big ? "w-11 h-11" : "w-9 h-9"} bg-amber-400 flex items-center justify-center shrink-0`} style={{ clipPath: "polygon(0 0, 100% 0, 100% 75%, 75% 75%, 75% 100%, 0 100%)" }}>
-        <Zap className={`${big ? "w-6 h-6" : "w-5 h-5"} text-slate-900`} strokeWidth={2.5} fill="currentColor" />
+        <Clock className={`${big ? "w-6 h-6" : "w-5 h-5"} text-slate-900`} strokeWidth={2.5} />
       </div>
       <div className="leading-none">
-        <div className={`font-black tracking-tight text-white ${big ? "text-xl" : "text-base"} uppercase`}>Frazão</div>
-        <div className={`text-amber-400 font-medium tracking-wide ${big ? "text-[11px]" : "text-[9px]"} uppercase`}>Iluminação &amp; Elétrica</div>
+        <div className={`font-black tracking-tight text-white ${big ? "text-xl" : "text-base"} uppercase`}>Gestão de</div>
+        <div className={`text-amber-400 font-medium tracking-wide ${big ? "text-[11px]" : "text-[9px]"} uppercase`}>Pontos</div>
       </div>
     </div>
   );
@@ -316,6 +316,9 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
   const [enviarLocalizacao, setEnviarLocalizacao] = useState(false);
   const [horaManual, setHoraManual] = useState(timeStr());
   const [dataRegistro, setDataRegistro] = useState(todayStr());
+  const [edicaoLiberada, setEdicaoLiberada] = useState(false);
+  const [mostrarPinAdmin, setMostrarPinAdmin] = useState(false);
+  const [pinAdminDigitado, setPinAdminDigitado] = useState("");
 
   const ativos = funcionarios.filter((f) => f.status === "Ativo");
   const obrasAtivas = obras.filter((o) => o.status === "Ativa");
@@ -323,7 +326,13 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
   const estado = funcionarioId ? getFuncionarioState(funcionarioId, registros, dataRegistro) : null;
   const dataDiferente = dataRegistro !== todayStr();
 
-  useEffect(() => { setObraSelecionada(""); setTrocando(false); setPinDigitado(""); setPinOk(false); setDataRegistro(todayStr()); }, [funcionarioId]);
+  useEffect(() => { setObraSelecionada(""); setTrocando(false); setPinDigitado(""); setPinOk(false); setDataRegistro(todayStr()); setEdicaoLiberada(false); setMostrarPinAdmin(false); setPinAdminDigitado(""); }, [funcionarioId]);
+
+  function confirmarPinAdmin() {
+    if (!funcionario?.pinAdmin) { notify("Esse colaborador não tem PIN administrativo cadastrado.", "error"); return; }
+    if (pinAdminDigitado === funcionario.pinAdmin) { setEdicaoLiberada(true); setMostrarPinAdmin(false); setPinAdminDigitado(""); notify("Edição de data e hora liberada."); }
+    else { notify("PIN administrativo incorreto.", "error"); setPinAdminDigitado(""); }
+  }
 
   const acaoLabel = { entrada: "Entrada", inicio_intervalo: "Início do intervalo", fim_intervalo: "Fim do intervalo", troca_obra: "Troca de obra", saida: "Saída" };
 
@@ -374,7 +383,9 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
         <Logo size="big" />
         <div className="mt-5 flex items-end justify-between gap-3">
           <div className="min-w-0">
-            <div className="text-white/50 text-xs font-bold tracking-widest uppercase">Registro de Ponto</div>
+            <div className="text-white/50 text-xs font-bold tracking-widest uppercase truncate">
+              {pinOk && funcionario ? `Gestão de Ponto (${funcionario.nome})` : "Gestão de Ponto"}
+            </div>
             <div className="text-white text-base sm:text-lg font-black tracking-tight mt-0.5 capitalize truncate">
               {new Date().toLocaleDateString("pt-BR", { weekday: "long", day: "2-digit", month: "long" })}
             </div>
@@ -410,10 +421,33 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
           {funcionario && pinOk && (
             <Field label="Data do registro">
               <input
-                type="date" className={inputCls} value={dataRegistro} max={todayStr()}
+                type="date" className={inputCls + (!edicaoLiberada ? " bg-slate-100 text-slate-400 cursor-not-allowed" : "")}
+                value={dataRegistro} max={todayStr()} disabled={!edicaoLiberada}
                 onChange={(e) => setDataRegistro(e.target.value)}
               />
-              <div className="text-xs text-slate-400 mt-1">Deixe em hoje para o uso normal. Só altere se estiver lançando o ponto de um dia anterior.</div>
+              {!edicaoLiberada && !mostrarPinAdmin && (
+                <button onClick={() => setMostrarPinAdmin(true)} className="flex items-center gap-1.5 text-xs font-bold text-slate-400 hover:text-slate-600 mt-1.5">
+                  <Lock className="w-3.5 h-3.5" /> Data e hora travados — desbloquear com PIN administrativo
+                </button>
+              )}
+              {!edicaoLiberada && mostrarPinAdmin && (
+                <div className="mt-2 flex items-center gap-2">
+                  <input
+                    type="password" inputMode="numeric" maxLength={4} placeholder="PIN admin"
+                    className={inputCls + " text-sm"} value={pinAdminDigitado}
+                    onChange={(e) => setPinAdminDigitado(e.target.value.replace(/\D/g, "").slice(0, 4))}
+                    onKeyDown={(e) => e.key === "Enter" && confirmarPinAdmin()}
+                    autoFocus
+                  />
+                  <button onClick={confirmarPinAdmin} className="shrink-0 bg-slate-900 text-white text-xs font-bold px-3 py-2.5 rounded-lg">Desbloquear</button>
+                  <button onClick={() => { setMostrarPinAdmin(false); setPinAdminDigitado(""); }} className="shrink-0 text-slate-400"><X className="w-4 h-4" /></button>
+                </div>
+              )}
+              {edicaoLiberada && (
+                <div className="mt-2 flex items-center gap-1.5 text-xs font-bold text-emerald-600">
+                  <CheckCircle2 className="w-3.5 h-3.5" /> Edição de data e hora liberada para este registro.
+                </div>
+              )}
               {dataDiferente && (
                 <div className="mt-2 flex items-center gap-1.5 text-xs font-bold text-sky-700 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2">
                   <CalendarPlus className="w-3.5 h-3.5" /> Lançando para {fmtBR(dataRegistro)} — os botões abaixo refletem a situação do funcionário nesse dia.
@@ -487,12 +521,14 @@ function TelaFuncionario({ funcionarios, obras, registros, onRegistrar, notify, 
           <div className="flex items-center justify-center gap-2 bg-slate-900 rounded-xl py-3 mb-1">
             <Timer className="w-5 h-5 text-amber-400 shrink-0" />
             <input
-              type="time" value={horaManual} onChange={(e) => setHoraManual(e.target.value)}
-              className="bg-transparent font-mono font-black text-3xl text-amber-400 tabular-nums text-center outline-none w-[7ch]"
+              type="time" value={horaManual} onChange={(e) => setHoraManual(e.target.value)} disabled={!edicaoLiberada}
+              className="bg-transparent font-mono font-black text-3xl text-amber-400 tabular-nums text-center outline-none w-[7ch] disabled:opacity-80"
               style={{ colorScheme: "dark" }}
             />
           </div>
-          <div className="text-center text-[11px] text-slate-400 mb-4">Toque no horário para ajustar manualmente, se precisar.</div>
+          <div className="text-center text-[11px] text-slate-400 mb-4">
+            {edicaoLiberada ? "Edição liberada — toque no horário para ajustar." : "Horário travado. Desbloqueie com o PIN administrativo para ajustar."}
+          </div>
           <div className="space-y-3 text-sm">
             <div className="flex justify-between border-b border-slate-100 pb-2"><span className="text-slate-500">Data</span><span className={`font-bold ${dataDiferente ? "text-sky-600" : "text-slate-900"}`}>{fmtBR(dataRegistro)}{dataDiferente && " (retroativo)"}</span></div>
             <div className="flex justify-between border-b border-slate-100 pb-2"><span className="text-slate-500">Funcionário</span><span className="font-bold text-slate-900">{funcionario?.nome}</span></div>
@@ -563,6 +599,7 @@ function AbaFuncionarios({ funcionarios, setFuncionarios, cargos, setCargos, reg
   const [modal, setModal] = useState(null);
   const [nome, setNome] = useState("");
   const [pin, setPin] = useState("");
+  const [pinAdmin, setPinAdmin] = useState("");
   const [cargoId, setCargoId] = useState("");
   const [personalizarValor, setPersonalizarValor] = useState(false);
   const [valorDiaria, setValorDiaria] = useState("");
@@ -572,11 +609,11 @@ function AbaFuncionarios({ funcionarios, setFuncionarios, cargos, setCargos, reg
   const [mostrarCargos, setMostrarCargos] = useState(false);
 
   function abrirNovo() {
-    setNome(""); setPin(""); setCargoId(""); setPersonalizarValor(false); setValorDiaria(""); setValorHora("");
+    setNome(""); setPin(""); setPinAdmin(""); setCargoId(""); setPersonalizarValor(false); setValorDiaria(""); setValorHora("");
     setModal({});
   }
   function abrirEditar(f) {
-    setNome(f.nome); setPin(f.pin || ""); setCargoId(f.cargoId || "");
+    setNome(f.nome); setPin(f.pin || ""); setPinAdmin(f.pinAdmin || ""); setCargoId(f.cargoId || "");
     setPersonalizarValor(f.valorDiaria != null || f.valorHora != null);
     setValorDiaria(f.valorDiaria ?? ""); setValorHora(f.valorHora ?? "");
     setModal({ editing: f });
@@ -584,8 +621,10 @@ function AbaFuncionarios({ funcionarios, setFuncionarios, cargos, setCargos, reg
   function salvar() {
     if (!nome.trim()) return;
     if (pin && pin.length !== 4) return;
+    if (pinAdmin && pinAdmin.length !== 4) return;
+    if (pinAdmin && pinAdmin === pin) { alert("O PIN administrativo precisa ser diferente do PIN normal."); return; }
     const dados = {
-      nome: nome.trim(), pin,
+      nome: nome.trim(), pin, pinAdmin: pinAdmin || null,
       cargoId: cargoId || null,
       valorDiaria: personalizarValor && valorDiaria !== "" ? Number(valorDiaria) : null,
       valorHora: personalizarValor && valorHora !== "" ? Number(valorHora) : null,
@@ -662,7 +701,7 @@ function AbaFuncionarios({ funcionarios, setFuncionarios, cargos, setCargos, reg
               <div>
                 <div className="font-semibold text-slate-800">{f.nome}</div>
                 <div className="text-xs text-slate-400">
-                  {qtd} registro(s) · {f.pin ? "PIN definido" : "sem PIN"} · {cargo ? cargo.nome : "sem cargo"}
+                  {qtd} registro(s) · {f.pin ? "PIN definido" : "sem PIN"} · {f.pinAdmin ? "PIN adm. definido" : "sem PIN adm."} · {cargo ? cargo.nome : "sem cargo"}
                   {(vd != null || vh != null) && <> · {vd != null ? `Diária R$ ${vd}` : ""}{vd != null && vh != null ? " / " : ""}{vh != null ? `Hora R$ ${vh}` : ""}</>}
                 </div>
               </div>
@@ -685,6 +724,13 @@ function AbaFuncionarios({ funcionarios, setFuncionarios, cargos, setCargos, reg
               value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="Ex: 1234"
             />
             <div className="text-xs text-slate-400 mt-1">Usado pelo funcionário para confirmar identidade ao bater o ponto.</div>
+          </Field>
+          <Field label="PIN administrativo (opcional, 4 dígitos)">
+            <input
+              type="text" inputMode="numeric" maxLength={4} className={inputCls}
+              value={pinAdmin} onChange={(e) => setPinAdmin(e.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="Ex: 9876"
+            />
+            <div className="text-xs text-slate-400 mt-1">Diferente do PIN normal. Só quem souber esse PIN consegue alterar a data/hora de um registro no momento de bater o ponto. Deixe em branco para não permitir alteração.</div>
           </Field>
           <Field label="Cargo">
             <select className={inputCls} value={cargoId} onChange={(e) => setCargoId(e.target.value)}>
