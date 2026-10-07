@@ -1143,12 +1143,154 @@ function AbaRelatorios({ registros, funcionarios, obras }) {
    ADMIN — DASHBOARD
    ========================================================================= */
 
-function AbaDashboard({ funcionarios, obras, registros, setTab }) {
+/* ---------- Resumo individual do funcionário (Dashboard) ---------- */
+function ResumoIndividual({ funcionario, cargos, registros, fechamentos, vales }) {
+  const [mes, setMes] = useState(todayStr().slice(0, 7));
+
+  const cargo = cargos.find((c) => c.id === funcionario.cargoId);
+  const { valorDiaria, valorHora } = valoresEfetivos(funcionario, cargos);
+  const estado = getFuncionarioState(funcionario.id, registros);
+
+  const dados = useMemo(() => {
+    const sessoes = computeSessions(registros.filter((r) => r.funcionarioId === funcionario.id));
+    const sessoesMes = sessoes.filter((s) => s.data.startsWith(mes));
+    const minutosMes = sessoesMes.reduce((a, s) => a + (s.minutosTrabalhados || 0), 0);
+    const diasTrabalhados = new Set(sessoesMes.map((s) => s.data)).size;
+    const porObra = {};
+    sessoesMes.forEach((s) => { porObra[s.obraNome] = (porObra[s.obraNome] || 0) + (s.minutosTrabalhados || 0); });
+
+    const fechs = fechamentos.filter((f) => f.funcionarioId === funcionario.id);
+    const fechsMes = fechs.filter((f) => f.data.startsWith(mes));
+    const brutoMes = fechsMes.reduce((a, f) => a + f.valorCalculado, 0);
+    const descontosMesLista = fechsMes.flatMap((f) => (f.descontos || []).map((d) => ({ ...d, data: f.data })));
+    const descontosMes = descontosMesLista.reduce((a, d) => a + d.valor, 0);
+    const qtdDiarias = fechsMes.filter((f) => f.tipoPagamento === "diaria").length;
+    const qtdPorHora = fechsMes.filter((f) => f.tipoPagamento === "hora").length;
+
+    const recebidoMes = fechs.filter((f) => f.pago && (f.dataPagamento || "").startsWith(mes)).reduce((a, f) => a + valorLiquidoFechamento(f), 0);
+    const totalRecebido = fechs.filter((f) => f.pago).reduce((a, f) => a + valorLiquidoFechamento(f), 0);
+    const aReceber = fechs.filter((f) => !f.pago).reduce((a, f) => a + valorLiquidoFechamento(f), 0);
+    const diasAReceber = fechs.filter((f) => !f.pago).length;
+
+    const valesDoFunc = vales.filter((v) => v.funcionarioId === funcionario.id);
+    const valesAbater = valesDoFunc.filter((v) => !v.quitado);
+    const totalValesAbater = valesAbater.reduce((a, v) => a + v.valor, 0);
+    const valesMes = valesDoFunc.filter((v) => v.data.startsWith(mes)).reduce((a, v) => a + v.valor, 0);
+
+    const fechadosSet = new Set(fechs.map((f) => f.data));
+    const diasSemFechar = new Set(sessoes.filter((s) => !s.aberta && !fechadosSet.has(s.data)).map((s) => s.data)).size;
+
+    return {
+      minutosMes, diasTrabalhados, porObra, brutoMes, descontosMes, descontosMesLista, qtdDiarias, qtdPorHora,
+      recebidoMes, totalRecebido, aReceber, diasAReceber, valesAbater, totalValesAbater, valesMes, diasSemFechar,
+      saldo: aReceber - totalValesAbater,
+    };
+  }, [registros, fechamentos, vales, funcionario.id, mes]);
+
+  const statusTexto = estado.status === "trabalhando" ? `Trabalhando — ${estado.obraNome}` : estado.status === "intervalo" ? `Em intervalo — ${estado.obraNome}` : "Fora do ponto";
+  const statusCor = estado.status === "trabalhando" ? "bg-emerald-100 text-emerald-700" : estado.status === "intervalo" ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-500";
+  const nomeMes = new Date(`${mes}-01T12:00:00`).toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+
+  const Item = ({ label, valor, destaque, cor }) => (
+    <div className={`rounded-xl p-3 ${destaque ? "bg-slate-900 text-white" : "bg-white border border-slate-200"}`}>
+      <div className={`text-[11px] font-bold uppercase ${destaque ? "text-white/50" : "text-slate-400"}`}>{label}</div>
+      <div className={`text-lg font-black mt-0.5 ${cor || (destaque ? "text-amber-400" : "text-slate-800")}`}>{valor}</div>
+    </div>
+  );
+
+  return (
+    <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 mb-6">
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+        <div>
+          <div className="text-lg font-black text-slate-900">{funcionario.nome}</div>
+          <div className="text-xs text-slate-500 mt-0.5">
+            {cargo ? cargo.nome : "Sem cargo"}
+            {valorDiaria != null && ` · Diária R$ ${valorDiaria.toFixed(2)}`}
+            {valorHora != null && ` · Hora R$ ${valorHora.toFixed(2)}`}
+          </div>
+          <span className={`inline-block mt-2 text-xs font-bold px-2 py-1 rounded-full ${statusCor}`}>{statusTexto}</span>
+        </div>
+        <div>
+          <div className="text-[11px] font-bold uppercase text-slate-400 mb-1">Mês de referência</div>
+          <input type="month" className={inputCls + " text-sm"} value={mes} onChange={(e) => e.target.value && setMes(e.target.value)} />
+        </div>
+      </div>
+
+      <div className="text-xs font-bold uppercase text-slate-400 mb-2 capitalize">Trabalho em {nomeMes}</div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+        <Item label="Dias trabalhados" valor={dados.diasTrabalhados} />
+        <Item label="Total de horas" valor={minsToHM(dados.minutosMes)} />
+        <Item label="Diárias fechadas" valor={dados.qtdDiarias} />
+        <Item label="Dias por hora" valor={dados.qtdPorHora} />
+      </div>
+
+      {Object.keys(dados.porObra).length > 0 && (
+        <div className="bg-white border border-slate-200 rounded-xl p-3 mb-4">
+          <div className="text-[11px] font-bold uppercase text-slate-400 mb-2">Horas por obra no mês</div>
+          {Object.entries(dados.porObra).sort((a, b) => b[1] - a[1]).map(([obra, min]) => (
+            <div key={obra} className="flex justify-between text-sm py-1 border-b border-slate-50 last:border-0">
+              <span className="text-slate-600">{obra}</span><span className="font-bold text-slate-800">{minsToHM(min)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="text-xs font-bold uppercase text-slate-400 mb-2 capitalize">Valores em {nomeMes}</div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+        <Item label="Valor bruto fechado" valor={`R$ ${dados.brutoMes.toFixed(2)}`} />
+        <Item label="Descontado" valor={`- R$ ${dados.descontosMes.toFixed(2)}`} cor="text-rose-600" />
+        <Item label="Vales no mês" valor={`- R$ ${dados.valesMes.toFixed(2)}`} cor="text-rose-600" />
+        <Item label="Recebido no mês" valor={`R$ ${dados.recebidoMes.toFixed(2)}`} cor="text-emerald-600" />
+      </div>
+
+      <div className="text-xs font-bold uppercase text-slate-400 mb-2">Situação atual (geral)</div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+        <Item label={`A receber (${dados.diasAReceber} dia(s))`} valor={`R$ ${dados.aReceber.toFixed(2)}`} />
+        <Item label="Vales a abater" valor={`- R$ ${dados.totalValesAbater.toFixed(2)}`} cor="text-rose-600" />
+        <Item label="Saldo a pagar" valor={`R$ ${dados.saldo.toFixed(2)}`} destaque />
+        <Item label="Total já recebido" valor={`R$ ${dados.totalRecebido.toFixed(2)}`} cor="text-emerald-600" />
+      </div>
+
+      {dados.diasSemFechar > 0 && (
+        <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 text-amber-700 text-xs font-semibold rounded-lg px-3 py-2 mb-4">
+          <AlertTriangle className="w-4 h-4 shrink-0" /> {dados.diasSemFechar} dia(s) trabalhado(s) ainda sem fechamento de diária/hora (aba Financeiro → Dias a fechar).
+        </div>
+      )}
+
+      <div className="grid sm:grid-cols-2 gap-3">
+        <div className="bg-white border border-slate-200 rounded-xl p-3">
+          <div className="text-[11px] font-bold uppercase text-slate-400 mb-2">Descontos do mês</div>
+          {dados.descontosMesLista.length === 0 && <div className="text-sm text-slate-400">Nenhum desconto.</div>}
+          {dados.descontosMesLista.map((d) => (
+            <div key={d.id} className="flex justify-between text-sm py-1 border-b border-slate-50 last:border-0">
+              <span className="text-slate-600">{fmtBR(d.data)} — {d.motivo || "sem motivo"}</span>
+              <span className="font-bold text-rose-600">- R$ {d.valor.toFixed(2)}</span>
+            </div>
+          ))}
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-3">
+          <div className="text-[11px] font-bold uppercase text-slate-400 mb-2">Vales aguardando abatimento</div>
+          {dados.valesAbater.length === 0 && <div className="text-sm text-slate-400">Nenhum vale pendente.</div>}
+          {dados.valesAbater.map((v) => (
+            <div key={v.id} className="flex justify-between text-sm py-1 border-b border-slate-50 last:border-0">
+              <span className="text-slate-600">{fmtBR(v.data)} — {v.motivo || "sem motivo"}</span>
+              <span className="font-bold text-rose-600">- R$ {v.valor.toFixed(2)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AbaDashboard({ funcionarios, obras, registros, fechamentos, vales, cargos, setTab }) {
   const [, forceTick] = useState(0);
+  const [funcSelId, setFuncSelId] = useState("");
   useEffect(() => {
     const t = setInterval(() => forceTick((n) => n + 1), 30000);
     return () => clearInterval(t);
   }, []);
+  const funcSel = funcionarios.find((f) => f.id === funcSelId) || null;
 
   const ativos = funcionarios.filter((f) => f.status === "Ativo");
   const obrasAtivas = obras.filter((o) => o.status === "Ativa");
@@ -1174,6 +1316,13 @@ function AbaDashboard({ funcionarios, obras, registros, setTab }) {
 
   return (
     <div>
+      <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><Users className="w-4 h-4" /> Resumo individual</h3>
+      <select className={inputCls + " mb-4 sm:max-w-sm"} value={funcSelId} onChange={(e) => setFuncSelId(e.target.value)}>
+        <option value="">Selecione um funcionário para ver o resumo detalhado</option>
+        {funcionarios.map((f) => <option key={f.id} value={f.id}>{f.nome}{f.status !== "Ativo" ? " (inativo)" : ""}</option>)}
+      </select>
+      {funcSel && <ResumoIndividual funcionario={funcSel} cargos={cargos} registros={registros} fechamentos={fechamentos} vales={vales} />}
+
       <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><LayoutDashboard className="w-4 h-4" /> Visão geral</h3>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
@@ -1308,6 +1457,20 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
   const [histFim, setHistFim] = useState("");
   const [verResumoHistorico, setVerResumoHistorico] = useState(false);
 
+  // Filtros
+  const [filtroPendFunc, setFiltroPendFunc] = useState("");
+  const [filtroFechFunc, setFiltroFechFunc] = useState("");
+  const [filtroFechStatus, setFiltroFechStatus] = useState("");
+  const [filtroFechIni, setFiltroFechIni] = useState("");
+  const [filtroFechFim, setFiltroFechFim] = useState("");
+  const [filtroValeFunc, setFiltroValeFunc] = useState("");
+  const [filtroValeStatus, setFiltroValeStatus] = useState("");
+
+  // Desconto em lote
+  const [selecionados, setSelecionados] = useState([]);
+  const [descontoLoteModal, setDescontoLoteModal] = useState(false);
+  const [descLoteMotivo, setDescLoteMotivo] = useState(""), [descLoteValor, setDescLoteValor] = useState("");
+
   const sessions = useMemo(() => computeSessions(registros), [registros]);
 
   const diasFechados = useMemo(() => new Set(fechamentos.map((f) => f.funcionarioId + "|" + f.data)), [fechamentos]);
@@ -1322,6 +1485,23 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
     });
     return Object.values(grupos).filter((g) => !diasFechados.has(g.funcionarioId + "|" + g.data)).sort((a, b) => b.data.localeCompare(a.data));
   }, [sessions, diasFechados]);
+
+  const diasPendentesFiltrados = useMemo(
+    () => diasPendentes.filter((d) => !filtroPendFunc || d.funcionarioId === filtroPendFunc),
+    [diasPendentes, filtroPendFunc]
+  );
+
+  const fechamentosFiltrados = useMemo(() => fechamentos
+    .filter((f) => !filtroFechFunc || f.funcionarioId === filtroFechFunc)
+    .filter((f) => !filtroFechStatus || (filtroFechStatus === "pago" ? f.pago : !f.pago))
+    .filter((f) => !filtroFechIni || f.data >= filtroFechIni)
+    .filter((f) => !filtroFechFim || f.data <= filtroFechFim)
+    .sort((a, b) => b.data.localeCompare(a.data)), [fechamentos, filtroFechFunc, filtroFechStatus, filtroFechIni, filtroFechFim]);
+
+  const valesFiltrados = useMemo(() => vales
+    .filter((v) => !filtroValeFunc || v.funcionarioId === filtroValeFunc)
+    .filter((v) => !filtroValeStatus || (filtroValeStatus === "quitado" ? v.quitado : !v.quitado))
+    .sort((a, b) => b.data.localeCompare(a.data)), [vales, filtroValeFunc, filtroValeStatus]);
 
   function fecharDia(dia, tipo) {
     const funcionario = funcionarios.find((f) => f.id === dia.funcionarioId);
@@ -1347,6 +1527,15 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
       ? { ...f, descontos: [...(f.descontos || []), { id: uid(), motivo: descMotivo.trim(), valor: Number(descValor) }] }
       : f)));
     setDescontoModal(null); setDescMotivo(""); setDescValor("");
+  }
+  function salvarDescontoLote() {
+    if (!descLoteValor || Number(descLoteValor) <= 0) { notify("Informe um valor de desconto válido.", "error"); return; }
+    const novoDesconto = () => ({ id: uid(), motivo: descLoteMotivo.trim(), valor: Number(descLoteValor) });
+    setFechamentos(fechamentos.map((f) => (selecionados.includes(f.id) && !f.pago
+      ? { ...f, descontos: [...(f.descontos || []), novoDesconto()] }
+      : f)));
+    notify(`Desconto de R$ ${Number(descLoteValor).toFixed(2)} aplicado em ${selecionados.length} dia(s).`);
+    setDescontoLoteModal(false); setDescLoteMotivo(""); setDescLoteValor(""); setSelecionados([]);
   }
   function removerDesconto(fechamentoId, descontoId) {
     setFechamentos(fechamentos.map((f) => (f.id === fechamentoId ? { ...f, descontos: (f.descontos || []).filter((d) => d.id !== descontoId) } : f)));
@@ -1425,8 +1614,12 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
 
       {subTab === "pendentes" && (
         <div className="space-y-3">
-          {diasPendentes.length === 0 && <div className="bg-white border border-slate-200 rounded-xl p-6 text-center text-slate-400 text-sm">Nenhum dia trabalhado pendente de fechamento.</div>}
-          {diasPendentes.map((d) => {
+          <select className={inputCls + " text-sm sm:max-w-xs"} value={filtroPendFunc} onChange={(e) => setFiltroPendFunc(e.target.value)}>
+            <option value="">Todos funcionários</option>
+            {funcionarios.map((f) => <option key={f.id} value={f.id}>{f.nome}</option>)}
+          </select>
+          {diasPendentesFiltrados.length === 0 && <div className="bg-white border border-slate-200 rounded-xl p-6 text-center text-slate-400 text-sm">Nenhum dia trabalhado pendente de fechamento.</div>}
+          {diasPendentesFiltrados.map((d) => {
             const funcionario = funcionarios.find((f) => f.id === d.funcionarioId);
             const { valorDiaria, valorHora } = valoresEfetivos(funcionario, cargos);
             const horas = d.totalMin / 60;
@@ -1462,49 +1655,82 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
       )}
 
       {subTab === "fechamentos" && (
-        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold">
-                <tr><th className="text-left px-3 py-2.5">Data</th><th className="text-left px-3 py-2.5">Funcionário</th><th className="text-left px-3 py-2.5">Tipo</th><th className="text-right px-3 py-2.5">Valor</th><th className="text-left px-3 py-2.5">Status</th><th className="text-left px-3 py-2.5"></th></tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {fechamentos.slice().sort((a, b) => b.data.localeCompare(a.data)).map((f) => {
-                  const liquido = valorLiquidoFechamento(f);
-                  const temDesconto = (f.descontos || []).length > 0;
-                  return (
-                    <tr key={f.id} className="hover:bg-slate-50 align-top">
-                      <td className="px-3 py-2.5 whitespace-nowrap">{fmtBR(f.data)}</td>
-                      <td className="px-3 py-2.5 whitespace-nowrap">{f.funcionarioNome}</td>
-                      <td className="px-3 py-2.5 whitespace-nowrap">{f.tipoPagamento === "diaria" ? "Diária" : "Por hora"}</td>
-                      <td className="px-3 py-2.5 whitespace-nowrap text-right">
-                        <div className="font-bold">R$ {liquido.toFixed(2)}</div>
-                        {temDesconto && <div className="text-xs text-slate-400 line-through">R$ {f.valorCalculado.toFixed(2)}</div>}
-                        {(f.descontos || []).map((d) => (
-                          <div key={d.id} className="text-[11px] text-rose-500 flex items-center justify-end gap-1">
-                            - R$ {d.valor.toFixed(2)} {d.motivo && `(${d.motivo})`}
-                            {!f.pago && <button onClick={() => removerDesconto(f.id, d.id)} className="text-slate-300 hover:text-rose-600"><X className="w-3 h-3" /></button>}
+        <div>
+          <div className="bg-white rounded-xl border border-slate-200 p-3 mb-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <select className={inputCls + " text-sm"} value={filtroFechFunc} onChange={(e) => setFiltroFechFunc(e.target.value)}>
+              <option value="">Todos funcionários</option>
+              {funcionarios.map((f) => <option key={f.id} value={f.id}>{f.nome}</option>)}
+            </select>
+            <select className={inputCls + " text-sm"} value={filtroFechStatus} onChange={(e) => setFiltroFechStatus(e.target.value)}>
+              <option value="">Todos status</option>
+              <option value="pendente">Pendente</option>
+              <option value="pago">Pago</option>
+            </select>
+            <input type="date" className={inputCls + " text-sm"} value={filtroFechIni} onChange={(e) => setFiltroFechIni(e.target.value)} />
+            <input type="date" className={inputCls + " text-sm"} value={filtroFechFim} onChange={(e) => setFiltroFechFim(e.target.value)} />
+          </div>
+
+          {selecionados.length > 0 && (
+            <div className="flex items-center justify-between bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+              <span className="text-xs font-bold text-amber-700">{selecionados.length} dia(s) selecionado(s)</span>
+              <div className="flex items-center gap-3">
+                <button onClick={() => setDescontoLoteModal(true)} className="text-xs font-bold text-amber-700 hover:text-amber-900">Aplicar desconto aos selecionados</button>
+                <button onClick={() => setSelecionados([])} className="text-xs font-bold text-slate-500 hover:text-slate-700">Limpar seleção</button>
+              </div>
+            </div>
+          )}
+
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold">
+                  <tr><th className="px-3 py-2.5 w-8"></th><th className="text-left px-3 py-2.5">Data</th><th className="text-left px-3 py-2.5">Funcionário</th><th className="text-left px-3 py-2.5">Tipo</th><th className="text-right px-3 py-2.5">Valor</th><th className="text-left px-3 py-2.5">Status</th><th className="text-left px-3 py-2.5"></th></tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {fechamentosFiltrados.map((f) => {
+                    const liquido = valorLiquidoFechamento(f);
+                    const temDesconto = (f.descontos || []).length > 0;
+                    const marcado = selecionados.includes(f.id);
+                    return (
+                      <tr key={f.id} className={`hover:bg-slate-50 align-top ${marcado ? "bg-amber-50/50" : ""}`}>
+                        <td className="px-3 py-2.5">
+                          {!f.pago && (
+                            <input type="checkbox" checked={marcado} className="w-4 h-4 accent-amber-500"
+                              onChange={(e) => setSelecionados(e.target.checked ? [...selecionados, f.id] : selecionados.filter((id) => id !== f.id))} />
+                          )}
+                        </td>
+                        <td className="px-3 py-2.5 whitespace-nowrap">{fmtBR(f.data)}</td>
+                        <td className="px-3 py-2.5 whitespace-nowrap">{f.funcionarioNome}</td>
+                        <td className="px-3 py-2.5 whitespace-nowrap">{f.tipoPagamento === "diaria" ? "Diária" : "Por hora"}</td>
+                        <td className="px-3 py-2.5 whitespace-nowrap text-right">
+                          <div className="font-bold">R$ {liquido.toFixed(2)}</div>
+                          {temDesconto && <div className="text-xs text-slate-400 line-through">R$ {f.valorCalculado.toFixed(2)}</div>}
+                          {(f.descontos || []).map((d) => (
+                            <div key={d.id} className="text-[11px] text-rose-500 flex items-center justify-end gap-1">
+                              - R$ {d.valor.toFixed(2)} {d.motivo && `(${d.motivo})`}
+                              {!f.pago && <button onClick={() => removerDesconto(f.id, d.id)} className="text-slate-300 hover:text-rose-600"><X className="w-3 h-3" /></button>}
+                            </div>
+                          ))}
+                        </td>
+                        <td className="px-3 py-2.5 whitespace-nowrap">
+                          <span className={`text-xs font-bold px-2 py-1 rounded-full ${f.pago ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{f.pago ? `Pago em ${fmtBR(f.dataPagamento)}` : "Pendente"}</span>
+                        </td>
+                        <td className="px-3 py-2.5 whitespace-nowrap">
+                          <div className="flex items-center gap-2">
+                            {!f.pago && <button onClick={() => setDescontoModal(f)} className="text-xs font-bold text-slate-500 hover:text-slate-700">+ Desconto</button>}
+                            {f.pago
+                              ? <button onClick={() => marcarPendente(f)} className="text-xs font-bold text-slate-500 hover:text-slate-700">Reabrir</button>
+                              : <button onClick={() => marcarPago(f)} className="text-xs font-bold text-emerald-600 hover:text-emerald-800">Marcar pago</button>}
+                            <button onClick={() => excluirFechamento(f)} className="text-slate-400 hover:text-rose-600"><Trash2 className="w-4 h-4" /></button>
                           </div>
-                        ))}
-                      </td>
-                      <td className="px-3 py-2.5 whitespace-nowrap">
-                        <span className={`text-xs font-bold px-2 py-1 rounded-full ${f.pago ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{f.pago ? `Pago em ${fmtBR(f.dataPagamento)}` : "Pendente"}</span>
-                      </td>
-                      <td className="px-3 py-2.5 whitespace-nowrap">
-                        <div className="flex items-center gap-2">
-                          {!f.pago && <button onClick={() => setDescontoModal(f)} className="text-xs font-bold text-slate-500 hover:text-slate-700">+ Desconto</button>}
-                          {f.pago
-                            ? <button onClick={() => marcarPendente(f)} className="text-xs font-bold text-slate-500 hover:text-slate-700">Reabrir</button>
-                            : <button onClick={() => marcarPago(f)} className="text-xs font-bold text-emerald-600 hover:text-emerald-800">Marcar pago</button>}
-                          <button onClick={() => excluirFechamento(f)} className="text-slate-400 hover:text-rose-600"><Trash2 className="w-4 h-4" /></button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-                {fechamentos.length === 0 && <tr><td colSpan={6} className="text-center py-8 text-slate-400">Nenhum dia fechado ainda.</td></tr>}
-              </tbody>
-            </table>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {fechamentosFiltrados.length === 0 && <tr><td colSpan={7} className="text-center py-8 text-slate-400">Nenhum fechamento encontrado.</td></tr>}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
@@ -1515,15 +1741,26 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
             <CircleDollarSign className="w-4 h-4 shrink-0 mt-0.5" />
             Todo vale desconta automaticamente do saldo a receber do funcionário assim que é criado. "Aguardando abatimento" significa que ele ainda está reduzindo o saldo atual; quando você fecha um pagamento, os vales usados nele passam para "Já abatido" e não descontam de novo depois.
           </div>
-          <div className="flex justify-end mb-3">
-            <button onClick={() => setValeModal(true)} className="flex items-center gap-1.5 bg-slate-900 text-white text-sm font-bold px-3.5 py-2 rounded-lg"><Plus className="w-4 h-4" /> Novo vale</button>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+            <div className="flex gap-2">
+              <select className={inputCls + " text-sm"} value={filtroValeFunc} onChange={(e) => setFiltroValeFunc(e.target.value)}>
+                <option value="">Todos funcionários</option>
+                {funcionarios.map((f) => <option key={f.id} value={f.id}>{f.nome}</option>)}
+              </select>
+              <select className={inputCls + " text-sm"} value={filtroValeStatus} onChange={(e) => setFiltroValeStatus(e.target.value)}>
+                <option value="">Todos status</option>
+                <option value="pendente">Aguardando abatimento</option>
+                <option value="quitado">Já abatido</option>
+              </select>
+            </div>
+            <button onClick={() => setValeModal(true)} className="flex items-center justify-center gap-1.5 bg-slate-900 text-white text-sm font-bold px-3.5 py-2 rounded-lg"><Plus className="w-4 h-4" /> Novo vale</button>
           </div>
           <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold"><tr><th className="text-left px-3 py-2.5">Data</th><th className="text-left px-3 py-2.5">Funcionário</th><th className="text-left px-3 py-2.5">Motivo</th><th className="text-right px-3 py-2.5">Valor</th><th className="text-left px-3 py-2.5">Status</th><th className="text-left px-3 py-2.5"></th></tr></thead>
                 <tbody className="divide-y divide-slate-100">
-                  {vales.slice().sort((a, b) => b.data.localeCompare(a.data)).map((v) => (
+                  {valesFiltrados.map((v) => (
                     <tr key={v.id} className="hover:bg-slate-50">
                       <td className="px-3 py-2.5 whitespace-nowrap">{fmtBR(v.data)}</td>
                       <td className="px-3 py-2.5 whitespace-nowrap">{v.funcionarioNome}</td>
@@ -1542,7 +1779,7 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
                       </td>
                     </tr>
                   ))}
-                  {vales.length === 0 && <tr><td colSpan={6} className="text-center py-8 text-slate-400">Nenhum vale registrado.</td></tr>}
+                  {valesFiltrados.length === 0 && <tr><td colSpan={6} className="text-center py-8 text-slate-400">Nenhum vale encontrado.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -1653,6 +1890,17 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
           <Field label="Motivo"><input className={inputCls} value={descMotivo} onChange={(e) => setDescMotivo(e.target.value)} placeholder="Ex: Marmita fornecida pela empresa" /></Field>
           <Field label="Valor (R$)"><input type="number" step="0.01" className={inputCls} value={descValor} onChange={(e) => setDescValor(e.target.value)} /></Field>
           <button onClick={salvarDesconto} className="w-full bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold py-3 rounded-lg">Adicionar desconto</button>
+        </Modal>
+      )}
+
+      {descontoLoteModal && (
+        <Modal title={`Desconto em ${selecionados.length} dia(s)`} onClose={() => setDescontoLoteModal(false)}>
+          <div className="text-xs text-slate-500 mb-4 bg-slate-50 rounded-lg px-3 py-2.5">
+            O mesmo desconto (motivo e valor) será aplicado em <b>cada um</b> dos dias selecionados. Total: R$ {(Number(descLoteValor || 0) * selecionados.length).toFixed(2)}.
+          </div>
+          <Field label="Motivo"><input className={inputCls} value={descLoteMotivo} onChange={(e) => setDescLoteMotivo(e.target.value)} placeholder="Ex: Marmita fornecida pela empresa" /></Field>
+          <Field label="Valor por dia (R$)"><input type="number" step="0.01" className={inputCls} value={descLoteValor} onChange={(e) => setDescLoteValor(e.target.value)} /></Field>
+          <button onClick={salvarDescontoLote} className="w-full bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold py-3 rounded-lg">Aplicar nos selecionados</button>
         </Modal>
       )}
 
@@ -1848,7 +2096,7 @@ function PainelAdmin({ funcionarios, setFuncionarios, obras, setObras, registros
         </div>
       </div>
       <div className="max-w-5xl mx-auto p-4">
-        {tab === "dashboard" && <AbaDashboard funcionarios={funcionarios} obras={obras} registros={registros} setTab={setTab} />}
+        {tab === "dashboard" && <AbaDashboard funcionarios={funcionarios} obras={obras} registros={registros} fechamentos={fechamentos} vales={vales} cargos={cargos} setTab={setTab} />}
         {tab === "funcionarios" && <AbaFuncionarios funcionarios={funcionarios} setFuncionarios={setFuncionarios} cargos={cargos} setCargos={setCargos} registros={registros} />}
         {tab === "obras" && <AbaObras obras={obras} setObras={setObras} registros={registros} />}
         {tab === "pontos" && <AbaPontos registros={registros} setRegistros={setRegistros} funcionarios={funcionarios} obras={obras} edicoes={edicoes} setEdicoes={setEdicoes} />}
