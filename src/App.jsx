@@ -1461,6 +1461,7 @@ function ResumoIndividual({ funcionario, cargos, registros, fechamentos, vales }
     const descontosMes = descontosMesLista.reduce((a, d) => a + d.valor, 0);
     const qtdDiarias = fechsMes.filter((f) => f.tipoPagamento === "diaria").length;
     const qtdPorHora = fechsMes.filter((f) => f.tipoPagamento === "hora").length;
+    const qtdManual = fechsMes.filter((f) => f.tipoPagamento === "manual").length;
 
     const recebidoMes = fechs.filter((f) => f.pago && (f.dataPagamento || "").startsWith(mes)).reduce((a, f) => a + valorLiquidoFechamento(f), 0);
     const totalRecebido = fechs.filter((f) => f.pago).reduce((a, f) => a + valorLiquidoFechamento(f), 0);
@@ -1476,7 +1477,7 @@ function ResumoIndividual({ funcionario, cargos, registros, fechamentos, vales }
     const diasSemFechar = new Set(sessoes.filter((s) => !s.aberta && !fechadosSet.has(s.data)).map((s) => s.data)).size;
 
     return {
-      minutosMes, diasTrabalhados, porObra, brutoMes, descontosMes, descontosMesLista, qtdDiarias, qtdPorHora,
+      minutosMes, diasTrabalhados, porObra, brutoMes, descontosMes, descontosMesLista, qtdDiarias, qtdPorHora, qtdManual,
       recebidoMes, totalRecebido, aReceber, diasAReceber, valesAbater, totalValesAbater, valesMes, diasSemFechar,
       saldo: aReceber - totalValesAbater,
     };
@@ -1512,11 +1513,12 @@ function ResumoIndividual({ funcionario, cargos, registros, fechamentos, vales }
       </div>
 
       <div className="text-xs font-bold uppercase text-slate-400 mb-2 capitalize">Trabalho em {nomeMes}</div>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-4">
         <Item label="Dias trabalhados" valor={dados.diasTrabalhados} />
         <Item label="Total de horas" valor={minsToHM(dados.minutosMes)} />
         <Item label="Diárias fechadas" valor={dados.qtdDiarias} />
         <Item label="Dias por hora" valor={dados.qtdPorHora} />
+        <Item label="Valor manual" valor={dados.qtdManual} />
       </div>
 
       {Object.keys(dados.porObra).length > 0 && (
@@ -1710,6 +1712,8 @@ function AbaDashboard({ funcionarios, obras, registros, fechamentos, vales, carg
   );
 }
 
+const tipoLabel = (t) => (t === "diaria" ? "Diária" : t === "manual" ? "Valor manual" : "Por hora");
+
 function valorLiquidoFechamento(f) {
   const descontos = f.descontos || [];
   return f.valorCalculado - descontos.reduce((a, d) => a + d.valor, 0);
@@ -1721,8 +1725,8 @@ function gerarTextoResumo({ funcionario, itens, totalMin, totalBruto, totalDesco
   if (periodoTexto) linhas.push(`Período: ${periodoTexto}`);
   linhas.push("");
   itens.forEach((f) => {
-    const tipo = f.tipoPagamento === "diaria" ? "Diária" : "Por hora";
-    linhas.push(`📅 ${fmtBR(f.data)} — ${tipo} — ${minsToHM(f.minutosTrabalhados)} — R$ ${f.valorCalculado.toFixed(2)}`);
+    const tipo = tipoLabel(f.tipoPagamento);
+    linhas.push(`📅 ${fmtBR(f.data)} — ${tipo}${f.observacao ? ` (${f.observacao})` : ""} — ${minsToHM(f.minutosTrabalhados)} — R$ ${f.valorCalculado.toFixed(2)}`);
     (f.descontos || []).forEach((d) => linhas.push(`     ↳ Desconto: ${d.motivo || "sem motivo"} — R$ ${d.valor.toFixed(2)}`));
   });
   linhas.push("");
@@ -1763,6 +1767,8 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
 
   // Desconto em lote
   const [selecionados, setSelecionados] = useState([]);
+  const [manualDia, setManualDia] = useState(null);
+  const [manualValor, setManualValor] = useState(""), [manualObs, setManualObs] = useState("");
   const [descontoLoteModal, setDescontoLoteModal] = useState(false);
   const [descLoteMotivo, setDescLoteMotivo] = useState(""), [descLoteValor, setDescLoteValor] = useState("");
 
@@ -1798,18 +1804,31 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
     .filter((v) => !filtroValeStatus || (filtroValeStatus === "quitado" ? v.quitado : !v.quitado))
     .sort((a, b) => b.data.localeCompare(a.data)), [vales, filtroValeFunc, filtroValeStatus]);
 
-  function fecharDia(dia, tipo) {
+  function fecharDia(dia, tipo, valorManual = null, observacao = "") {
     const funcionario = funcionarios.find((f) => f.id === dia.funcionarioId);
     const { valorDiaria, valorHora } = valoresEfetivos(funcionario, cargos);
     const horas = dia.totalMin / 60;
-    const valorCalculado = tipo === "diaria" ? valorDiaria : Math.round(valorHora * horas * 100) / 100;
-    if (valorCalculado == null) { notify("Defina o valor de diária/hora no cadastro do funcionário ou do cargo antes de fechar.", "error"); return; }
+    let valorCalculado = null, valorUsado = null;
+    if (tipo === "diaria") { valorCalculado = valorDiaria; valorUsado = valorDiaria; }
+    else if (tipo === "hora") { valorUsado = valorHora; valorCalculado = valorHora == null ? null : Math.round(valorHora * horas * 100) / 100; }
+    else { valorCalculado = Math.round(Number(valorManual) * 100) / 100; valorUsado = valorCalculado; }
+    if (valorCalculado == null || isNaN(valorCalculado)) { notify("Defina o valor de diária/hora no cadastro do funcionário ou do cargo antes de fechar.", "error"); return false; }
     setFechamentos([...fechamentos, {
       id: uid(), funcionarioId: dia.funcionarioId, funcionarioNome: dia.funcionarioNome, data: dia.data,
-      tipoPagamento: tipo, minutosTrabalhados: dia.totalMin, valorUsado: tipo === "diaria" ? valorDiaria : valorHora,
-      valorCalculado, descontos: [], pago: false, dataPagamento: null, criadoEm: new Date().toISOString(),
+      tipoPagamento: tipo, minutosTrabalhados: dia.totalMin, valorUsado,
+      valorCalculado, observacao: observacao.trim() || null, descontos: [], pago: false, dataPagamento: null, criadoEm: new Date().toISOString(),
     }]);
-    notify(`Dia ${fmtBR(dia.data)} de ${dia.funcionarioNome} fechado como ${tipo === "diaria" ? "diária" : "hora"}: R$ ${valorCalculado.toFixed(2)}.`);
+    notify(`Dia ${fmtBR(dia.data)} de ${dia.funcionarioNome} fechado (${tipoLabel(tipo).toLowerCase()}): R$ ${valorCalculado.toFixed(2)}.`);
+    return true;
+  }
+  function abrirManual(dia) {
+    const funcionario = funcionarios.find((f) => f.id === dia.funcionarioId);
+    const { valorDiaria } = valoresEfetivos(funcionario, cargos);
+    setManualValor(valorDiaria != null ? String(valorDiaria) : ""); setManualObs(""); setManualDia(dia);
+  }
+  function confirmarManual() {
+    if (manualValor === "" || Number(manualValor) < 0) { notify("Informe um valor válido.", "error"); return; }
+    if (fecharDia(manualDia, "manual", manualValor, manualObs)) setManualDia(null);
   }
 
   function marcarPago(f) { setFechamentos(fechamentos.map((x) => (x.id === f.id ? { ...x, pago: true, dataPagamento: todayStr() } : x))); }
@@ -1933,7 +1952,7 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
                 <div className="text-xs text-slate-500 mb-3">
                   {Object.entries(d.obras).map(([obra, min]) => `${obra}: ${minsToHM(min)}`).join(" · ")}
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-col sm:flex-row gap-2">
                   <button onClick={() => fecharDia(d, "diaria")} disabled={valorDiaria == null}
                     className="flex-1 rounded-lg border border-slate-300 disabled:opacity-40 disabled:cursor-not-allowed py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50">
                     Fechar diária {valorDiaria != null ? `(R$ ${valorDiaria.toFixed(2)})` : "(sem valor definido)"}
@@ -1941,6 +1960,10 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
                   <button onClick={() => fecharDia(d, "hora")} disabled={valorHora == null}
                     className="flex-1 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed py-2.5 text-sm font-bold text-slate-900">
                     Fechar por hora {valorHora != null ? `(R$ ${(valorHora * horas).toFixed(2)})` : "(sem valor definido)"}
+                  </button>
+                  <button onClick={() => abrirManual(d)}
+                    className="flex-1 rounded-lg bg-slate-900 hover:bg-slate-800 py-2.5 text-sm font-bold text-white">
+                    Valor manual…
                   </button>
                 </div>
               </div>
@@ -1996,7 +2019,7 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
                         </td>
                         <td className="px-3 py-2.5 whitespace-nowrap">{fmtBR(f.data)}</td>
                         <td className="px-3 py-2.5 whitespace-nowrap">{f.funcionarioNome}</td>
-                        <td className="px-3 py-2.5 whitespace-nowrap">{f.tipoPagamento === "diaria" ? "Diária" : "Por hora"}</td>
+                        <td className="px-3 py-2.5 whitespace-nowrap">{tipoLabel(f.tipoPagamento)}{f.observacao && <div className="text-[11px] text-slate-400">{f.observacao}</div>}</td>
                         <td className="px-3 py-2.5 whitespace-nowrap text-right">
                           <div className="font-bold">R$ {liquido.toFixed(2)}</div>
                           {temDesconto && <div className="text-xs text-slate-400 line-through">R$ {f.valorCalculado.toFixed(2)}</div>}
@@ -2124,7 +2147,7 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
                         {itensPagos.map((f) => (
                           <tr key={f.id}>
                             <td className="px-3 py-2 whitespace-nowrap">{fmtBR(f.data)}</td>
-                            <td className="px-3 py-2 whitespace-nowrap">{f.tipoPagamento === "diaria" ? "Diária" : "Por hora"}</td>
+                            <td className="px-3 py-2 whitespace-nowrap">{tipoLabel(f.tipoPagamento)}</td>
                             <td className="px-3 py-2 whitespace-nowrap">{minsToHM(f.minutosTrabalhados)}</td>
                             <td className="px-3 py-2 whitespace-nowrap text-slate-500">{fmtBR(f.dataPagamento)}</td>
                             <td className="px-3 py-2 whitespace-nowrap text-right font-bold">R$ {valorLiquidoFechamento(f).toFixed(2)}</td>
@@ -2187,6 +2210,30 @@ function AbaFinanceiro({ funcionarios, cargos, registros, fechamentos, setFecham
           <button onClick={salvarDesconto} className="w-full bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold py-3 rounded-lg">Adicionar desconto</button>
         </Modal>
       )}
+
+      {manualDia && (() => {
+        const func = funcionarios.find((f) => f.id === manualDia.funcionarioId);
+        const { valorDiaria, valorHora } = valoresEfetivos(func, cargos);
+        const porHora = valorHora != null ? Math.round(valorHora * (manualDia.totalMin / 60) * 100) / 100 : null;
+        return (
+          <Modal title="Fechar com valor manual" onClose={() => setManualDia(null)}>
+            <div className="bg-slate-50 rounded-lg px-3 py-2.5 mb-4 text-sm">
+              <div className="font-bold text-slate-800">{manualDia.funcionarioNome} — {fmtBR(manualDia.data)}</div>
+              <div className="text-xs text-slate-500 mt-0.5">{minsToHM(manualDia.totalMin)} · {Object.entries(manualDia.obras).map(([o, m]) => `${o}: ${minsToHM(m)}`).join(" · ")}</div>
+            </div>
+            {(valorDiaria != null || porHora != null) && (
+              <div className="flex flex-wrap gap-2 mb-3">
+                {valorDiaria != null && <button onClick={() => setManualValor(String(valorDiaria))} className="text-xs font-bold border border-slate-300 rounded-full px-3 py-1.5 text-slate-600">Diária R$ {valorDiaria.toFixed(2)}</button>}
+                {porHora != null && <button onClick={() => setManualValor(String(porHora))} className="text-xs font-bold border border-slate-300 rounded-full px-3 py-1.5 text-slate-600">Por hora R$ {porHora.toFixed(2)}</button>}
+                {valorDiaria != null && <button onClick={() => setManualValor(String(Math.round(valorDiaria * 50) / 100))} className="text-xs font-bold border border-slate-300 rounded-full px-3 py-1.5 text-slate-600">Meia diária R$ {(valorDiaria / 2).toFixed(2)}</button>}
+              </div>
+            )}
+            <Field label="Valor do dia (R$)"><input type="number" step="0.01" min="0" className={inputCls} value={manualValor} onChange={(e) => setManualValor(e.target.value)} autoFocus /></Field>
+            <Field label="Observação (opcional)"><input className={inputCls} value={manualObs} onChange={(e) => setManualObs(e.target.value)} placeholder="Ex: meia diária, combinado com o dono" /></Field>
+            <button onClick={confirmarManual} className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-3 rounded-lg">Fechar dia com este valor</button>
+          </Modal>
+        );
+      })()}
 
       {descontoLoteModal && (
         <Modal title={`Desconto em ${selecionados.length} dia(s)`} onClose={() => setDescontoLoteModal(false)}>
@@ -2259,7 +2306,7 @@ function ModalResumoPagamento({ funcionario, fechamentos, vales, setFechamentos,
                   {itens.map((f) => (
                     <tr key={f.id}>
                       <td className="px-3 py-2 whitespace-nowrap">{fmtBR(f.data)}</td>
-                      <td className="px-3 py-2 whitespace-nowrap">{f.tipoPagamento === "diaria" ? "Diária" : "Por hora"}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">{tipoLabel(f.tipoPagamento)}</td>
                       <td className="px-3 py-2 whitespace-nowrap">{minsToHM(f.minutosTrabalhados)}</td>
                       <td className="px-3 py-2 whitespace-nowrap text-right">
                         R$ {f.valorCalculado.toFixed(2)}
