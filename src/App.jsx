@@ -5,7 +5,7 @@ import {
   ChevronLeft, FileSpreadsheet, AlertTriangle, Loader2, X, Ban,
   PlayCircle, Lock, KeyRound, Settings, LayoutDashboard, Trash2,
   Activity, Timer, Wallet, Receipt, CircleDollarSign, CalendarPlus,
-  ClipboardList,
+  ClipboardList, Archive,
 } from "lucide-react";
 import { loadKey, saveKey, configOk } from "./storage";
 
@@ -770,8 +770,296 @@ function AbaFuncionarios({ funcionarios, setFuncionarios, cargos, setCargos, reg
    ADMIN — OBRAS
    ========================================================================= */
 
-function AbaObras({ obras, setObras, registros }) {
+/* =========================================================================
+   RESUMO FINAL DE OBRA (arquivo permanente)
+   ========================================================================= */
+
+// Monta o resumo de uma obra: horas e valor recebido por funcionário + registros diários.
+// O valor de um dia (fechamento) é dividido entre as obras na proporção das horas trabalhadas em cada uma.
+function gerarResumoObra(obra, registros, fechamentos) {
+  const todas = computeSessions(registros);
+  const minutosDia = {};
+  todas.forEach((s) => { const k = s.funcionarioId + "|" + s.data; minutosDia[k] = (minutosDia[k] || 0) + (s.minutosTrabalhados || 0); });
+  const fechPorDia = {};
+  fechamentos.forEach((f) => { fechPorDia[f.funcionarioId + "|" + f.data] = f; });
+
+  const sessoes = todas.filter((s) => s.obraId === obra.id);
+  const porFunc = {};
+  const linhas = [];
+  let abertas = 0;
+
+  sessoes.forEach((s) => {
+    if (s.aberta) abertas++;
+    const k = s.funcionarioId + "|" + s.data;
+    const fech = fechPorDia[k];
+    const total = minutosDia[k] || 0;
+    const min = s.minutosTrabalhados || 0;
+    const frac = total > 0 ? min / total : 0;
+    const bruto = fech ? fech.valorCalculado * frac : null;
+    const desc = fech ? (fech.descontos || []).reduce((a, d) => a + d.valor, 0) * frac : null;
+    const liquido = fech ? valorLiquidoFechamento(fech) * frac : null;
+
+    linhas.push({
+      data: s.data, funcionarioNome: s.funcionarioNome, entrada: s.entrada,
+      intervalo: s.intervaloInicio && s.intervaloFim ? `${s.intervaloInicio}–${s.intervaloFim}` : s.intervaloAutomatico ? "12:00–13:00 (auto)" : "-",
+      saida: s.aberta ? "Em andamento" : s.saida, minutos: min, valor: liquido,
+    });
+
+    const p = (porFunc[s.funcionarioId] = porFunc[s.funcionarioId] || {
+      funcionarioId: s.funcionarioId, nome: s.funcionarioNome, dias: new Set(), semFechar: new Set(),
+      minutos: 0, bruto: 0, descontos: 0, liquido: 0, pago: 0, aPagar: 0,
+    });
+    p.dias.add(s.data);
+    p.minutos += min;
+    if (fech) {
+      p.bruto += bruto; p.descontos += desc; p.liquido += liquido;
+      if (fech.pago) p.pago += liquido; else p.aPagar += liquido;
+    } else {
+      p.semFechar.add(s.data);
+    }
+  });
+
+  const funcionarios = Object.values(porFunc).map((p) => ({
+    funcionarioId: p.funcionarioId, nome: p.nome, dias: p.dias.size, minutos: p.minutos,
+    bruto: p.bruto, descontos: p.descontos, liquido: p.liquido, pago: p.pago, aPagar: p.aPagar, diasSemFechar: p.semFechar.size,
+  })).sort((a, b) => b.liquido - a.liquido);
+
+  const datas = sessoes.map((s) => s.data).sort();
+  const soma = (campo) => funcionarios.reduce((a, f) => a + f[campo], 0);
+
+  return {
+    id: uid(), obraId: obra.id, obraNome: obra.nome, cliente: obra.cliente, endereco: obra.endereco, cidade: obra.cidade,
+    geradoEm: new Date().toISOString(), periodoIni: datas[0] || null, periodoFim: datas[datas.length - 1] || null,
+    abertas, funcionarios, linhas: linhas.sort((a, b) => (a.data + a.entrada).localeCompare(b.data + b.entrada)),
+    totais: {
+      minutos: soma("minutos"), dias: soma("dias"), bruto: soma("bruto"), descontos: soma("descontos"),
+      liquido: soma("liquido"), pago: soma("pago"), aPagar: soma("aPagar"), diasSemFechar: soma("diasSemFechar"),
+    },
+  };
+}
+
+const money = (v) => `R$ ${(v || 0).toFixed(2)}`;
+
+function exportarResumoObra(resumo, formato) {
+  const slug = (resumo.obraNome || "obra").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase();
+  const hdrF = ["Funcionário", "Dias", "Horas", "Valor bruto", "Descontos", "Valor líquido", "Já pago", "A pagar", "Dias sem fechamento"];
+  const rowsF = resumo.funcionarios.map((f) => [f.nome, f.dias, minsToHM(f.minutos), f.bruto, f.descontos, f.liquido, f.pago, f.aPagar, f.diasSemFechar]);
+  const t = resumo.totais;
+  rowsF.push(["TOTAL", t.dias, minsToHM(t.minutos), t.bruto, t.descontos, t.liquido, t.pago, t.aPagar, t.diasSemFechar]);
+  const hdrR = ["Data", "Funcionário", "Entrada", "Intervalo", "Saída", "Horas trabalhadas", "Valor (parte desta obra)"];
+  const rowsR = resumo.linhas.map((l) => [fmtBR(l.data), l.funcionarioNome, l.entrada, l.intervalo, l.saida, minsToHM(l.minutos), l.valor == null ? "dia sem fechamento" : l.valor]);
+  const periodo = resumo.periodoIni ? `${fmtBR(resumo.periodoIni)} a ${fmtBR(resumo.periodoFim)}` : "-";
+
+  if (formato === "xlsx") {
+    if (!window.XLSX) { alert("Biblioteca de Excel não carregada."); return; }
+    const X = window.XLSX;
+    const wb = X.utils.book_new();
+    const capa = [["Obra", resumo.obraNome], ["Cliente", resumo.cliente || "-"], ["Endereço", `${resumo.endereco || ""} ${resumo.cidade ? "— " + resumo.cidade : ""}`], ["Período", periodo], ["Gerado em", new Date(resumo.geradoEm).toLocaleString("pt-BR")], [], hdrF, ...rowsF];
+    X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(capa), "Resumo");
+    X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([hdrR, ...rowsR]), "Registros");
+    X.writeFile(wb, `resumo_obra_${slug}.xlsx`);
+    return;
+  }
+  const esc = (v) => `"${String(typeof v === "number" ? v.toFixed(2).replace(".", ",") : v ?? "").replace(/"/g, '""')}"`;
+  const linha = (arr) => arr.map(esc).join(";");
+  const csv = [
+    linha(["Obra", resumo.obraNome]), linha(["Cliente", resumo.cliente || "-"]), linha(["Período", periodo]), "",
+    linha(hdrF), ...rowsF.map(linha), "", linha(hdrR), ...rowsR.map(linha),
+  ].join("\r\n");
+  downloadFile("\uFEFF" + csv, `resumo_obra_${slug}.csv`, "text/csv;charset=utf-8");
+}
+
+function ResumoObraView({ resumo }) {
+  const t = resumo.totais;
+  const periodo = resumo.periodoIni ? `${fmtBR(resumo.periodoIni)} a ${fmtBR(resumo.periodoFim)}` : "sem registros";
+  return (
+    <div>
+      <div className="mb-4">
+        <div className="text-lg font-black text-slate-900">{resumo.obraNome}</div>
+        <div className="text-xs text-slate-500 mt-0.5">{resumo.cliente || "Sem cliente"}{resumo.endereco ? ` · ${resumo.endereco}` : ""}{resumo.cidade ? ` — ${resumo.cidade}` : ""}</div>
+        <div className="text-xs text-slate-400 mt-0.5">Período trabalhado: {periodo}</div>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+        <div className="bg-white border border-slate-200 rounded-xl p-3"><div className="text-[11px] font-bold uppercase text-slate-400">Funcionários</div><div className="text-lg font-black text-slate-800">{resumo.funcionarios.length}</div></div>
+        <div className="bg-white border border-slate-200 rounded-xl p-3"><div className="text-[11px] font-bold uppercase text-slate-400">Total de horas</div><div className="text-lg font-black text-slate-800">{minsToHM(t.minutos)}</div></div>
+        <div className="bg-slate-900 rounded-xl p-3"><div className="text-[11px] font-bold uppercase text-white/50">Valor total</div><div className="text-lg font-black text-amber-400">{money(t.liquido)}</div></div>
+        <div className="bg-white border border-slate-200 rounded-xl p-3"><div className="text-[11px] font-bold uppercase text-slate-400">Já pago / A pagar</div><div className="text-sm font-black text-slate-800">{money(t.pago)} <span className="text-slate-300">/</span> {money(t.aPagar)}</div></div>
+      </div>
+
+      {t.diasSemFechar > 0 && (
+        <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 text-amber-700 text-xs font-semibold rounded-lg px-3 py-2 mb-4">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" /> {t.diasSemFechar} dia(s) de trabalho ainda não têm fechamento de diária/hora (aba Financeiro). O valor desses dias não está somado aqui.
+        </div>
+      )}
+      {resumo.abertas > 0 && (
+        <div className="flex items-start gap-2 bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold rounded-lg px-3 py-2 mb-4">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" /> Há {resumo.abertas} período(s) ainda em andamento nesta obra (funcionário sem saída registrada).
+        </div>
+      )}
+
+      <div className="text-xs font-bold uppercase text-slate-400 mb-2">Quanto cada funcionário recebeu nesta obra</div>
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden mb-4">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold">
+              <tr><th className="text-left px-3 py-2">Funcionário</th><th className="text-right px-3 py-2">Dias</th><th className="text-right px-3 py-2">Horas</th><th className="text-right px-3 py-2">Bruto</th><th className="text-right px-3 py-2">Desc.</th><th className="text-right px-3 py-2">Líquido</th><th className="text-right px-3 py-2">Pago</th><th className="text-right px-3 py-2">A pagar</th></tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {resumo.funcionarios.map((f) => (
+                <tr key={f.funcionarioId}>
+                  <td className="px-3 py-2 whitespace-nowrap font-semibold text-slate-800">{f.nome}</td>
+                  <td className="px-3 py-2 text-right">{f.dias}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">{minsToHM(f.minutos)}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">{money(f.bruto)}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap text-rose-500">- {money(f.descontos)}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap font-bold">{money(f.liquido)}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap text-emerald-600">{money(f.pago)}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap text-amber-600">{money(f.aPagar)}</td>
+                </tr>
+              ))}
+              {resumo.funcionarios.length === 0 && <tr><td colSpan={8} className="text-center py-6 text-slate-400">Nenhum funcionário registrou ponto nesta obra.</td></tr>}
+              {resumo.funcionarios.length > 0 && (
+                <tr className="bg-slate-50 font-black">
+                  <td className="px-3 py-2">TOTAL</td><td className="px-3 py-2 text-right">{t.dias}</td><td className="px-3 py-2 text-right whitespace-nowrap">{minsToHM(t.minutos)}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">{money(t.bruto)}</td><td className="px-3 py-2 text-right whitespace-nowrap text-rose-500">- {money(t.descontos)}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">{money(t.liquido)}</td><td className="px-3 py-2 text-right whitespace-nowrap">{money(t.pago)}</td><td className="px-3 py-2 text-right whitespace-nowrap">{money(t.aPagar)}</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div className="text-[11px] text-slate-400 mb-4">Quando o funcionário passou por mais de uma obra no mesmo dia, o valor do dia é dividido proporcionalmente às horas em cada obra. Vales não entram aqui (são do funcionário, não da obra).</div>
+
+      <div className="text-xs font-bold uppercase text-slate-400 mb-2">Entradas e saídas ({resumo.linhas.length})</div>
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        <div className="overflow-x-auto max-h-80 overflow-y-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold sticky top-0">
+              <tr><th className="text-left px-3 py-2">Data</th><th className="text-left px-3 py-2">Funcionário</th><th className="text-left px-3 py-2">Entrada</th><th className="text-left px-3 py-2">Intervalo</th><th className="text-left px-3 py-2">Saída</th><th className="text-right px-3 py-2">Horas</th><th className="text-right px-3 py-2">Valor</th></tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {resumo.linhas.map((l, i) => (
+                <tr key={i}>
+                  <td className="px-3 py-2 whitespace-nowrap">{fmtBR(l.data)}</td><td className="px-3 py-2 whitespace-nowrap">{l.funcionarioNome}</td>
+                  <td className="px-3 py-2">{l.entrada}</td><td className="px-3 py-2 whitespace-nowrap">{l.intervalo}</td><td className="px-3 py-2 whitespace-nowrap">{l.saida}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">{minsToHM(l.minutos)}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">{l.valor == null ? <span className="text-slate-300">sem fechar</span> : money(l.valor)}</td>
+                </tr>
+              ))}
+              {resumo.linhas.length === 0 && <tr><td colSpan={7} className="text-center py-6 text-slate-400">Sem registros.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BotoesExportarResumo({ resumo }) {
+  return (
+    <div className="flex gap-2">
+      <button onClick={() => exportarResumoObra(resumo, "xlsx")} className="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 py-2.5 text-sm font-bold text-slate-700"><FileSpreadsheet className="w-4 h-4" /> Excel</button>
+      <button onClick={() => exportarResumoObra(resumo, "csv")} className="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 py-2.5 text-sm font-bold text-slate-700"><Download className="w-4 h-4" /> CSV</button>
+    </div>
+  );
+}
+
+// Gera o resumo ao vivo e permite salvar no arquivo permanente
+function ModalResumoObra({ obra, registros, fechamentos, arquivos, setArquivos, obras, setObras, notify, onClose }) {
+  const resumo = useMemo(() => gerarResumoObra(obra, registros, fechamentos), [obra, registros, fechamentos]);
+  const [encerrar, setEncerrar] = useState(obra.status === "Ativa");
+  const jaSalvo = arquivos.filter((a) => a.obraId === obra.id).sort((a, b) => b.geradoEm.localeCompare(a.geradoEm))[0];
+
+  function salvar() {
+    setArquivos([...arquivos, resumo]);
+    if (encerrar && obra.status === "Ativa") setObras(obras.map((o) => (o.id === obra.id ? { ...o, status: "Encerrada" } : o)));
+    notify(`Resumo da obra "${obra.nome}" salvo na aba Arquivo.`);
+    onClose();
+  }
+
+  return (
+    <Modal title="Resumo da obra" onClose={onClose} wide>
+      {jaSalvo && (
+        <div className="flex items-start gap-2 bg-sky-50 border border-sky-200 text-sky-700 text-xs font-semibold rounded-lg px-3 py-2 mb-4">
+          <Archive className="w-4 h-4 shrink-0 mt-0.5" /> Já existe um resumo salvo desta obra em {new Date(jaSalvo.geradoEm).toLocaleDateString("pt-BR")}. Salvar de novo cria uma versão nova (a anterior é mantida).
+        </div>
+      )}
+      <ResumoObraView resumo={resumo} />
+      <div className="mt-5 space-y-3">
+        <BotoesExportarResumo resumo={resumo} />
+        {obra.status === "Ativa" && (
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={encerrar} onChange={(e) => setEncerrar(e.target.checked)} className="w-4 h-4 accent-amber-500" />
+            <span className="text-sm font-semibold text-slate-600">Marcar a obra como encerrada ao salvar</span>
+          </label>
+        )}
+        <button onClick={salvar} disabled={resumo.linhas.length === 0} className="w-full flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white font-bold py-3 rounded-lg">
+          <Archive className="w-4 h-4" /> Salvar resumo no arquivo
+        </button>
+        {resumo.linhas.length === 0 && <div className="text-xs text-slate-400 text-center">Esta obra ainda não tem registros de ponto.</div>}
+      </div>
+    </Modal>
+  );
+}
+
+/* =========================================================================
+   ADMIN — ARQUIVO (resumos de obras salvos)
+   ========================================================================= */
+
+function AbaArquivo({ arquivos, setArquivos, notify }) {
+  const [ver, setVer] = useState(null);
+  const lista = arquivos.slice().sort((a, b) => b.geradoEm.localeCompare(a.geradoEm));
+
+  function excluir(a) {
+    if (!window.confirm(`Excluir o resumo salvo da obra "${a.obraNome}"? Isso não pode ser desfeito.`)) return;
+    setArquivos(arquivos.filter((x) => x.id !== a.id));
+    notify("Resumo excluído do arquivo.");
+  }
+
+  return (
+    <div>
+      <h3 className="font-bold text-slate-800 mb-1 flex items-center gap-2"><Archive className="w-4 h-4" /> Arquivo de obras ({lista.length})</h3>
+      <p className="text-xs text-slate-400 mb-4">Resumos finais salvos de cada obra. Continuam aqui mesmo depois de você zerar os dados de ponto.</p>
+      <div className="space-y-3">
+        {lista.length === 0 && <div className="p-6 text-center text-slate-400 text-sm bg-white rounded-xl border border-slate-200">Nenhum resumo salvo ainda. Na aba Obras, use "Resumo / Arquivar" ao finalizar uma obra.</div>}
+        {lista.map((a) => (
+          <div key={a.id} className="bg-white rounded-xl border border-slate-200 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-bold text-slate-800">{a.obraNome}</div>
+                <div className="text-xs text-slate-500">{a.cliente || "Sem cliente"} · {a.periodoIni ? `${fmtBR(a.periodoIni)} a ${fmtBR(a.periodoFim)}` : "sem período"}</div>
+                <div className="text-xs text-slate-400 mt-1">{a.funcionarios.length} funcionário(s) · {minsToHM(a.totais.minutos)} · salvo em {new Date(a.geradoEm).toLocaleDateString("pt-BR")}</div>
+              </div>
+              <div className="text-right shrink-0">
+                <div className="text-[11px] font-bold uppercase text-slate-400">Valor total</div>
+                <div className="font-black text-slate-800">{money(a.totais.liquido)}</div>
+              </div>
+            </div>
+            <div className="flex gap-2 mt-3">
+              <button onClick={() => setVer(a)} className="text-xs font-bold text-slate-600 border border-slate-300 px-3 py-1.5 rounded-lg">Ver resumo</button>
+              <button onClick={() => exportarResumoObra(a, "xlsx")} className="text-xs font-bold text-slate-600 border border-slate-300 px-3 py-1.5 rounded-lg">Excel</button>
+              <button onClick={() => exportarResumoObra(a, "csv")} className="text-xs font-bold text-slate-600 border border-slate-300 px-3 py-1.5 rounded-lg">CSV</button>
+              <button onClick={() => excluir(a)} className="ml-auto text-slate-400 hover:text-rose-600"><Trash2 className="w-4 h-4" /></button>
+            </div>
+          </div>
+        ))}
+      </div>
+      {ver && (
+        <Modal title="Resumo salvo" onClose={() => setVer(null)} wide>
+          <div className="text-xs text-slate-400 mb-3">Salvo em {new Date(ver.geradoEm).toLocaleString("pt-BR")}</div>
+          <ResumoObraView resumo={ver} />
+          <div className="mt-5"><BotoesExportarResumo resumo={ver} /></div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function AbaObras({ obras, setObras, registros, fechamentos, arquivos, setArquivos, notify }) {
   const [modal, setModal] = useState(null);
+  const [resumoObra, setResumoObra] = useState(null);
   const [form, setForm] = useState({ nome: "", cliente: "", endereco: "", cidade: "" });
   function abrirNova() { setForm({ nome: "", cliente: "", endereco: "", cidade: "" }); setModal({}); }
   function abrirEditar(o) { setForm({ nome: o.nome, cliente: o.cliente, endereco: o.endereco, cidade: o.cidade }); setModal({ editing: o }); }
@@ -807,6 +1095,7 @@ function AbaObras({ obras, setObras, registros }) {
               <div className="flex gap-2 mt-3">
                 <button onClick={() => abrirEditar(o)} className="flex items-center gap-1 text-xs font-bold text-slate-600 border border-slate-300 px-3 py-1.5 rounded-lg"><Pencil className="w-3.5 h-3.5" /> Editar</button>
                 <button onClick={() => toggleStatus(o)} className="flex items-center gap-1 text-xs font-bold text-slate-600 border border-slate-300 px-3 py-1.5 rounded-lg">{o.status === "Ativa" ? <><Ban className="w-3.5 h-3.5" /> Encerrar</> : <><CheckCircle2 className="w-3.5 h-3.5" /> Reativar</>}</button>
+                <button onClick={() => setResumoObra(o)} className="flex items-center gap-1 text-xs font-bold text-sky-700 border border-sky-200 bg-sky-50 px-3 py-1.5 rounded-lg"><Archive className="w-3.5 h-3.5" /> Resumo / Arquivar</button>
               </div>
             </div>
           );
@@ -820,6 +1109,12 @@ function AbaObras({ obras, setObras, registros }) {
           <Field label="Cidade"><input className={inputCls} value={form.cidade} onChange={(e) => setForm({ ...form, cidade: e.target.value })} /></Field>
           <button onClick={salvar} className="w-full bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold py-3 rounded-lg">Salvar</button>
         </Modal>
+      )}
+      {resumoObra && (
+        <ModalResumoObra
+          obra={resumoObra} registros={registros} fechamentos={fechamentos} arquivos={arquivos} setArquivos={setArquivos}
+          obras={obras} setObras={setObras} notify={notify} onClose={() => setResumoObra(null)}
+        />
       )}
     </div>
   );
@@ -2041,8 +2336,9 @@ function ModalResumoHistorico({ funcionario, itens, totalMin, totalBruto, totalD
    ADMIN — CONFIGURAÇÕES (trocar senha)
    ========================================================================= */
 
-function AbaConfiguracoes({ config, setConfig, notify }) {
+function AbaConfiguracoes({ config, setConfig, notify, snapshot, onZerar }) {
   const [atual, setAtual] = useState(""), [nova, setNova] = useState(""), [confirma, setConfirma] = useState("");
+  const [zerarModal, setZerarModal] = useState(false);
   function salvar() {
     const senhaAtual = config?.adminPassword || DEFAULT_ADMIN_PASSWORD;
     if (atual !== senhaAtual) { notify("Senha atual incorreta.", "error"); return; }
@@ -2053,7 +2349,7 @@ function AbaConfiguracoes({ config, setConfig, notify }) {
     setAtual(""); setNova(""); setConfirma("");
   }
   return (
-    <div className="max-w-sm">
+    <div className="max-w-md">
       <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><Settings className="w-4 h-4" /> Senha administrativa</h3>
       <div className="bg-white border border-slate-200 rounded-xl p-4">
         <Field label="Senha atual"><input type="password" className={inputCls} value={atual} onChange={(e) => setAtual(e.target.value)} /></Field>
@@ -2061,7 +2357,84 @@ function AbaConfiguracoes({ config, setConfig, notify }) {
         <Field label="Confirmar nova senha"><input type="password" className={inputCls} value={confirma} onChange={(e) => setConfirma(e.target.value)} /></Field>
         <button onClick={salvar} className="w-full bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold py-3 rounded-lg">Atualizar senha</button>
       </div>
+
+      <h3 className="font-bold text-slate-800 mt-8 mb-3 flex items-center gap-2"><Archive className="w-4 h-4" /> Backup e limpeza de dados</h3>
+      <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
+        <p className="text-xs text-slate-500 leading-relaxed">
+          Quando uma obra terminar, salve o resumo dela na aba <b>Obras → Resumo / Arquivar</b>. Depois disso você pode zerar os dados de ponto para não deixar informação antiga aberta. Os resumos salvos (aba Arquivo) <b>não são apagados</b> ao zerar.
+        </p>
+        <button onClick={() => baixarBackup(snapshot)} className="w-full flex items-center justify-center gap-2 border border-slate-300 py-2.5 rounded-lg text-sm font-bold text-slate-700"><Download className="w-4 h-4" /> Baixar backup completo (JSON)</button>
+        <button onClick={() => setZerarModal(true)} className="w-full flex items-center justify-center gap-2 bg-rose-50 border border-rose-200 text-rose-700 py-2.5 rounded-lg text-sm font-bold"><Trash2 className="w-4 h-4" /> Zerar dados…</button>
+      </div>
+
+      {zerarModal && <ModalZerarDados snapshot={snapshot} onZerar={onZerar} notify={notify} onClose={() => setZerarModal(false)} />}
     </div>
+  );
+}
+
+function baixarBackup(snapshot) {
+  const conteudo = JSON.stringify({ geradoEm: new Date().toISOString(), ...snapshot }, null, 2);
+  downloadFile(conteudo, `backup_gestao_pontos_${todayStr()}.json`, "application/json");
+}
+
+function ModalZerarDados({ snapshot, onZerar, notify, onClose }) {
+  const [limparFunc, setLimparFunc] = useState(false);
+  const [limparObras, setLimparObras] = useState(false);
+  const [limparCargos, setLimparCargos] = useState(false);
+  const [texto, setTexto] = useState("");
+
+  const { registros, fechamentos, vales, obras, arquivos } = snapshot;
+
+  const pendencias = useMemo(() => {
+    const aPagar = fechamentos.filter((f) => !f.pago).reduce((a, f) => a + valorLiquidoFechamento(f), 0);
+    const valesPend = vales.filter((v) => !v.quitado).reduce((a, v) => a + v.valor, 0);
+    const fechadosSet = new Set(fechamentos.map((f) => f.funcionarioId + "|" + f.data));
+    const diasSemFechar = new Set(computeSessions(registros).filter((s) => !s.aberta && !fechadosSet.has(s.funcionarioId + "|" + s.data)).map((s) => s.funcionarioId + "|" + s.data)).size;
+    const comRegistro = new Set(registros.map((r) => r.obraId));
+    const obrasSemResumo = obras.filter((o) => comRegistro.has(o.id) && !arquivos.some((a) => a.obraId === o.id));
+    return { aPagar, valesPend, diasSemFechar, obrasSemResumo };
+  }, [registros, fechamentos, vales, obras, arquivos]);
+
+  function confirmar() {
+    onZerar({ funcionarios: limparFunc, obras: limparObras, cargos: limparCargos });
+    notify("Dados zerados. Os resumos arquivados foram mantidos.");
+    onClose();
+  }
+
+  const avisos = [];
+  if (pendencias.obrasSemResumo.length > 0) avisos.push(`Obras com registros e SEM resumo salvo: ${pendencias.obrasSemResumo.map((o) => o.nome).join(", ")}.`);
+  if (pendencias.aPagar > 0) avisos.push(`Ainda há ${money(pendencias.aPagar)} em dias fechados e não pagos.`);
+  if (pendencias.valesPend > 0) avisos.push(`Há ${money(pendencias.valesPend)} em vales ainda não abatidos.`);
+  if (pendencias.diasSemFechar > 0) avisos.push(`Há ${pendencias.diasSemFechar} dia(s) trabalhado(s) sem fechamento de diária/hora.`);
+
+  return (
+    <Modal title="Zerar dados" onClose={onClose}>
+      <div className="flex items-start gap-2 bg-rose-50 border border-rose-200 rounded-lg p-3 mb-4 text-sm text-rose-700">
+        <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" /> Esta ação apaga os dados abaixo de forma definitiva. Baixe um backup antes se tiver qualquer dúvida.
+      </div>
+
+      {avisos.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4 text-xs text-amber-800 space-y-1">
+          <div className="font-bold uppercase">Atenção — pendências encontradas</div>
+          {avisos.map((a, i) => <div key={i}>• {a}</div>)}
+        </div>
+      )}
+
+      <div className="space-y-2 mb-4 text-sm">
+        <label className="flex items-start gap-2 opacity-80"><input type="checkbox" checked disabled className="mt-0.5 w-4 h-4" /><span>Registros de ponto, correções, fechamentos de pagamento e vales <b>(sempre)</b></span></label>
+        <label className="flex items-start gap-2 cursor-pointer"><input type="checkbox" checked={limparFunc} onChange={(e) => setLimparFunc(e.target.checked)} className="mt-0.5 w-4 h-4 accent-rose-600" /><span>Cadastro de funcionários (inclui PINs)</span></label>
+        <label className="flex items-start gap-2 cursor-pointer"><input type="checkbox" checked={limparObras} onChange={(e) => setLimparObras(e.target.checked)} className="mt-0.5 w-4 h-4 accent-rose-600" /><span>Cadastro de obras</span></label>
+        <label className="flex items-start gap-2 cursor-pointer"><input type="checkbox" checked={limparCargos} onChange={(e) => setLimparCargos(e.target.checked)} className="mt-0.5 w-4 h-4 accent-rose-600" /><span>Cargos e valores padrão</span></label>
+        <div className="text-xs text-emerald-700 font-semibold pt-1">✔ Resumos salvos na aba Arquivo e a senha do administrador serão mantidos.</div>
+      </div>
+
+      <button onClick={() => baixarBackup(snapshot)} className="w-full flex items-center justify-center gap-2 border border-slate-300 py-2.5 rounded-lg text-sm font-bold text-slate-700 mb-4"><Download className="w-4 h-4" /> Baixar backup antes de zerar</button>
+
+      <Field label='Para confirmar, digite ZERAR'>
+        <input className={inputCls} value={texto} onChange={(e) => setTexto(e.target.value)} placeholder="ZERAR" />
+      </Field>
+      <button onClick={confirmar} disabled={texto.trim().toUpperCase() !== "ZERAR"} className="w-full bg-rose-600 hover:bg-rose-700 disabled:opacity-40 text-white font-bold py-3 rounded-lg">Zerar dados agora</button>
+    </Modal>
   );
 }
 
@@ -2069,7 +2442,7 @@ function AbaConfiguracoes({ config, setConfig, notify }) {
    ADMIN SHELL
    ========================================================================= */
 
-function PainelAdmin({ funcionarios, setFuncionarios, obras, setObras, registros, setRegistros, edicoes, setEdicoes, cargos, setCargos, fechamentos, setFechamentos, vales, setVales, config, setConfig, notify, goHome }) {
+function PainelAdmin({ funcionarios, setFuncionarios, obras, setObras, registros, setRegistros, edicoes, setEdicoes, cargos, setCargos, fechamentos, setFechamentos, vales, setVales, arquivos, setArquivos, onZerar, config, setConfig, notify, goHome }) {
   const [tab, setTab] = useState("dashboard");
   const tabs = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -2078,6 +2451,7 @@ function PainelAdmin({ funcionarios, setFuncionarios, obras, setObras, registros
     { id: "pontos", label: "Pontos", icon: Clock },
     { id: "financeiro", label: "Financeiro", icon: Wallet },
     { id: "relatorios", label: "Relatórios", icon: FileSpreadsheet },
+    { id: "arquivo", label: "Arquivo", icon: Archive },
     { id: "config", label: "Configurações", icon: Settings },
   ];
   return (
@@ -2098,11 +2472,12 @@ function PainelAdmin({ funcionarios, setFuncionarios, obras, setObras, registros
       <div className="max-w-5xl mx-auto p-4">
         {tab === "dashboard" && <AbaDashboard funcionarios={funcionarios} obras={obras} registros={registros} fechamentos={fechamentos} vales={vales} cargos={cargos} setTab={setTab} />}
         {tab === "funcionarios" && <AbaFuncionarios funcionarios={funcionarios} setFuncionarios={setFuncionarios} cargos={cargos} setCargos={setCargos} registros={registros} />}
-        {tab === "obras" && <AbaObras obras={obras} setObras={setObras} registros={registros} />}
+        {tab === "obras" && <AbaObras obras={obras} setObras={setObras} registros={registros} fechamentos={fechamentos} arquivos={arquivos} setArquivos={setArquivos} notify={notify} />}
         {tab === "pontos" && <AbaPontos registros={registros} setRegistros={setRegistros} funcionarios={funcionarios} obras={obras} edicoes={edicoes} setEdicoes={setEdicoes} />}
         {tab === "financeiro" && <AbaFinanceiro funcionarios={funcionarios} cargos={cargos} registros={registros} fechamentos={fechamentos} setFechamentos={setFechamentos} vales={vales} setVales={setVales} notify={notify} />}
         {tab === "relatorios" && <AbaRelatorios registros={registros} funcionarios={funcionarios} obras={obras} />}
-        {tab === "config" && <AbaConfiguracoes config={config} setConfig={setConfig} notify={notify} />}
+        {tab === "arquivo" && <AbaArquivo arquivos={arquivos} setArquivos={setArquivos} notify={notify} />}
+        {tab === "config" && <AbaConfiguracoes config={config} setConfig={setConfig} notify={notify} snapshot={{ funcionarios, obras, cargos, registros, edicoes, fechamentos, vales, arquivos }} onZerar={onZerar} />}
       </div>
     </div>
   );
@@ -2122,15 +2497,16 @@ export default function App() {
   const [cargos, _setCargos] = useState([]);
   const [fechamentos, _setFechamentos] = useState([]);
   const [vales, _setVales] = useState([]);
+  const [arquivos, _setArquivos] = useState([]);
   const [config, _setConfig] = useState(null);
   const [toast, setToast] = useState(null);
 
   useEffect(() => {
     (async () => {
-      const [f, o, r, e, c, cg, fc, vl] = await Promise.all([
+      const [f, o, r, e, c, cg, fc, vl, ar] = await Promise.all([
         loadKey("funcionarios", null), loadKey("obras", null), loadKey("registros", []),
         loadKey("edicoes", []), loadKey("config", null),
-        loadKey("cargos", null), loadKey("fechamentos", []), loadKey("vales", []),
+        loadKey("cargos", null), loadKey("fechamentos", []), loadKey("vales", []), loadKey("arquivos", []),
       ]);
       _setFuncionarios(f ?? SEED_FUNCIONARIOS);
       _setObras(o ?? SEED_OBRAS);
@@ -2140,6 +2516,7 @@ export default function App() {
       _setCargos(cg ?? SEED_CARGOS);
       _setFechamentos(fc);
       _setVales(vl);
+      _setArquivos(ar);
       if (f === null) saveKey("funcionarios", SEED_FUNCIONARIOS);
       if (o === null) saveKey("obras", SEED_OBRAS);
       if (c === null) saveKey("config", { adminPassword: DEFAULT_ADMIN_PASSWORD });
@@ -2156,9 +2533,18 @@ export default function App() {
   const setCargos = useCallback((v) => { _setCargos(v); saveKey("cargos", v); }, []);
   const setFechamentos = useCallback((v) => { _setFechamentos(v); saveKey("fechamentos", v); }, []);
   const setVales = useCallback((v) => { _setVales(v); saveKey("vales", v); }, []);
+  const setArquivos = useCallback((v) => { _setArquivos(v); saveKey("arquivos", v); }, []);
 
   function notify(msg, type = "success") { setToast({ msg, type }); setTimeout(() => setToast(null), 3200); }
   function registrarPonto(registro) { setRegistros([...registros, registro]); }
+
+  // Zera dados operacionais. Os resumos arquivados de obras (arquivos) e a senha de admin nunca são apagados aqui.
+  function zerarDados({ funcionarios: limparFunc, obras: limparObras, cargos: limparCargos }) {
+    setRegistros([]); setEdicoes([]); setFechamentos([]); setVales([]);
+    if (limparFunc) setFuncionarios([]);
+    if (limparObras) setObras([]);
+    if (limparCargos) setCargos([]);
+  }
 
   function irParaAdmin() {
     if (sessionStorage.getItem("ponto_admin_auth") === "1") setTela("admin");
@@ -2203,6 +2589,8 @@ export default function App() {
           cargos={cargos} setCargos={setCargos}
           fechamentos={fechamentos} setFechamentos={setFechamentos}
           vales={vales} setVales={setVales}
+          arquivos={arquivos} setArquivos={setArquivos}
+          onZerar={zerarDados}
           config={config} setConfig={setConfig}
           notify={notify}
           goHome={() => setTela("home")}

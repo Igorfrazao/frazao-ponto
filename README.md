@@ -45,3 +45,8 @@ npm run dev
 Veja o passo a passo completo na conversa com o Claude, ou resumidamente:
 build command `npm run build`, publish directory `dist`, e configure as variáveis
 `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` no painel do Netlify.
+
+## Encerrando uma obra e zerando dados
+
+- **Aba Obras → "Resumo / Arquivar"**: gera o resumo final da obra (horas, entradas/saídas e quanto cada funcionário recebeu nela) e salva na aba **Arquivo**. Dá para exportar em Excel/CSV.
+- **Aba Configurações → "Zerar dados"**: apaga registros de ponto, fechamentos e vales (e, se marcado, funcionários/obras/cargos). Pede backup, mostra pendências e exige digitar `ZERAR`. Os resumos da aba Arquivo e a senha do administrador nunca são apagados.
